@@ -5,13 +5,16 @@ Handles various export formats and options
 from core import PDFDocument, LayerManager
 from core.layer import LayerType, Layer
 from core.interactive_layer import TextFieldLayer, ImageLayer, SymbolLayer
-from PyQt6.QtGui import QPainter, QImage
+from PyQt6.QtGui import QPainter, QImage, QPixmap
 from PyQt6.QtCore import Qt, QRectF, QBuffer, QIODevice
 import fitz
-from typing import Optional
+from typing import Optional, Dict, Any
 import io
 import json
 import base64
+import os
+import tempfile
+import zipfile
 
 
 class PDFExporter:
@@ -106,25 +109,46 @@ class PDFExporter:
             # Convert hex color to RGB tuple (0-1 range)
             color = self._hex_to_rgb(color_hex)
 
-            # Map font names to PyMuPDF font names
-            font_map = {
-                'Arial': 'helv',
-                'Helvetica': 'helv',
-                'Times New Roman': 'times',
-                'Times': 'times',
-                'Courier New': 'cour',
-                'Courier': 'cour'
-            }
-
-            pymupdf_font = font_map.get(font_name, 'helv')
-
-            # Add bold/italic suffix
+            # Map font names to PyMuPDF Base14 font names
+            # Use full font names that PyMuPDF recognizes
             if bold and italic:
-                pymupdf_font += 'bi'
+                font_map = {
+                    'Arial': 'Helvetica-BoldOblique',
+                    'Helvetica': 'Helvetica-BoldOblique',
+                    'Times New Roman': 'Times-BoldItalic',
+                    'Times': 'Times-BoldItalic',
+                    'Courier New': 'Courier-BoldOblique',
+                    'Courier': 'Courier-BoldOblique'
+                }
             elif bold:
-                pymupdf_font += 'b'
+                font_map = {
+                    'Arial': 'Helvetica-Bold',
+                    'Helvetica': 'Helvetica-Bold',
+                    'Times New Roman': 'Times-Bold',
+                    'Times': 'Times-Bold',
+                    'Courier New': 'Courier-Bold',
+                    'Courier': 'Courier-Bold'
+                }
             elif italic:
-                pymupdf_font += 'i'
+                font_map = {
+                    'Arial': 'Helvetica-Oblique',
+                    'Helvetica': 'Helvetica-Oblique',
+                    'Times New Roman': 'Times-Italic',
+                    'Times': 'Times-Italic',
+                    'Courier New': 'Courier-Oblique',
+                    'Courier': 'Courier-Oblique'
+                }
+            else:
+                font_map = {
+                    'Arial': 'Helvetica',
+                    'Helvetica': 'Helvetica',
+                    'Times New Roman': 'Times-Roman',
+                    'Times': 'Times-Roman',
+                    'Courier New': 'Courier',
+                    'Courier': 'Courier'
+                }
+
+            pymupdf_font = font_map.get(font_name, 'Helvetica-Bold' if bold else 'Helvetica')
 
             # Create text rectangle
             rect = fitz.Rect(x, y, x + width, y + height)
@@ -660,3 +684,323 @@ class PDFExporter:
         except Exception as e:
             print(f"Error exporting page as image: {e}")
             return False
+
+
+class ProjectManager:
+    """Handles saving and loading project files (.pdfproj)
+
+    Project file format is a ZIP archive containing:
+    - document.pdf: The original PDF document
+    - project.json: Project metadata, layers, guides, and settings
+    """
+
+    PROJECT_VERSION = "1.0"
+    PROJECT_EXTENSION = ".pdfproj"
+
+    @staticmethod
+    def save_project(output_path: str, pdf_doc: PDFDocument, layer_manager: LayerManager,
+                     guide_manager=None, settings: Dict[str, Any] = None) -> bool:
+        """Save a complete project file
+
+        Args:
+            output_path: Path to save the project file
+            pdf_doc: The PDF document
+            layer_manager: The layer manager with all layers
+            guide_manager: Optional guide manager for guides
+            settings: Optional additional settings dict
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not pdf_doc or not pdf_doc.doc:
+            print("Error: No PDF document to save")
+            return False
+
+        try:
+            # Create a temporary directory for project contents
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Save the PDF document
+                pdf_path = os.path.join(temp_dir, "document.pdf")
+                pdf_doc.doc.save(pdf_path)
+
+                # Prepare project data
+                project_data = {
+                    "version": ProjectManager.PROJECT_VERSION,
+                    "layers": ProjectManager._serialize_layers(layer_manager),
+                    "guides": ProjectManager._serialize_guides(guide_manager) if guide_manager else [],
+                    "settings": settings or {}
+                }
+
+                # Save project JSON
+                json_path = os.path.join(temp_dir, "project.json")
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(project_data, f, indent=2, default=ProjectManager._json_serializer)
+
+                # Create ZIP archive
+                with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    zipf.write(pdf_path, "document.pdf")
+                    zipf.write(json_path, "project.json")
+
+            print(f"Project saved successfully: {output_path}")
+            return True
+
+        except Exception as e:
+            print(f"Error saving project: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    @staticmethod
+    def load_project(project_path: str) -> Optional[Dict[str, Any]]:
+        """Load a project file
+
+        Args:
+            project_path: Path to the project file
+
+        Returns:
+            Dictionary containing:
+            - 'pdf_path': Temporary path to extracted PDF
+            - 'layers': List of layer data dicts
+            - 'guides': List of guide data dicts
+            - 'settings': Settings dict
+            - 'temp_dir': Temporary directory (caller must clean up)
+
+            Returns None on error
+        """
+        if not os.path.exists(project_path):
+            print(f"Error: Project file not found: {project_path}")
+            return None
+
+        try:
+            # Create temporary directory for extracted files
+            temp_dir = tempfile.mkdtemp(prefix="pdfproj_")
+
+            # Extract ZIP archive
+            with zipfile.ZipFile(project_path, 'r') as zipf:
+                zipf.extractall(temp_dir)
+
+            # Load project JSON
+            json_path = os.path.join(temp_dir, "project.json")
+            with open(json_path, 'r', encoding='utf-8') as f:
+                project_data = json.load(f)
+
+            # Restore pixmaps from base64
+            if 'layers' in project_data:
+                for layer_data in project_data['layers']:
+                    ProjectManager._restore_pixmaps(layer_data)
+
+            return {
+                'pdf_path': os.path.join(temp_dir, "document.pdf"),
+                'layers': project_data.get('layers', []),
+                'guides': project_data.get('guides', []),
+                'settings': project_data.get('settings', {}),
+                'version': project_data.get('version', '1.0'),
+                'temp_dir': temp_dir
+            }
+
+        except Exception as e:
+            print(f"Error loading project: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    @staticmethod
+    def _serialize_layers(layer_manager: LayerManager) -> list:
+        """Serialize all layers to a list of dicts"""
+        layers_data = []
+
+        for layer in layer_manager.layers:
+            layer_dict = {
+                'id': layer.id,
+                'type': layer.type.value if hasattr(layer.type, 'value') else str(layer.type),
+                'page_num': layer.page_num,
+                'name': layer.name,
+                'visible': layer.visible,
+                'locked': layer.locked,
+                'opacity': layer.opacity,
+                'data': dict(layer.data) if layer.data else {},
+                'class': type(layer).__name__
+            }
+
+            # Handle rotation for interactive layers
+            if hasattr(layer, 'rotation'):
+                layer_dict['rotation'] = layer.rotation
+
+            # Handle pixmap in data (convert to base64)
+            if 'pixmap' in layer_dict['data'] and layer_dict['data']['pixmap'] is not None:
+                pixmap = layer_dict['data']['pixmap']
+                if isinstance(pixmap, QPixmap):
+                    buffer = QBuffer()
+                    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+                    pixmap.save(buffer, "PNG")
+                    layer_dict['data']['pixmap'] = {
+                        '_pixmap_base64': base64.b64encode(buffer.data().data()).decode()
+                    }
+
+            layers_data.append(layer_dict)
+
+        return layers_data
+
+    @staticmethod
+    def _serialize_guides(guide_manager) -> list:
+        """Serialize all guides to a list of dicts"""
+        if not guide_manager:
+            return []
+
+        guides_data = []
+        for guide in guide_manager.guides:
+            guides_data.append({
+                'orientation': guide.orientation.value,
+                'position': guide.position,
+                'page_num': guide.page_num,
+                'locked': guide.locked
+            })
+
+        return guides_data
+
+    @staticmethod
+    def _json_serializer(obj):
+        """Custom JSON serializer for non-serializable objects"""
+        if isinstance(obj, QPixmap):
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            obj.save(buffer, "PNG")
+            return {'_pixmap_base64': base64.b64encode(buffer.data().data()).decode()}
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    @staticmethod
+    def _restore_pixmaps(data):
+        """Restore QPixmap objects from base64 encoded data"""
+        if isinstance(data, dict):
+            if '_pixmap_base64' in data:
+                pixmap = QPixmap()
+                pixmap.loadFromData(base64.b64decode(data['_pixmap_base64']))
+                return pixmap
+
+            for key, value in list(data.items()):
+                result = ProjectManager._restore_pixmaps(value)
+                if result is not None:
+                    data[key] = result
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                result = ProjectManager._restore_pixmaps(item)
+                if result is not None:
+                    data[i] = result
+
+        return None
+
+    @staticmethod
+    def restore_layers(layer_manager: LayerManager, layers_data: list):
+        """Restore layers from serialized data
+
+        Args:
+            layer_manager: The layer manager to add layers to
+            layers_data: List of layer data dicts from project file
+        """
+        from core.layer import LayerType
+        from core.interactive_layer import TextFieldLayer, ImageLayer, SymbolLayer
+
+        for layer_data in layers_data:
+            layer_class = layer_data.get('class', 'Layer')
+            page_num = layer_data.get('page_num', 0)
+            data = layer_data.get('data', {})
+
+            layer = None
+
+            if layer_class == 'TextFieldLayer':
+                layer = TextFieldLayer(
+                    page_num=page_num,
+                    x=data.get('x', 0),
+                    y=data.get('y', 0),
+                    text=data.get('text', ''),
+                    width=data.get('width', 150),
+                    height=data.get('height', 40)
+                )
+                # Restore additional text properties
+                for key in ['font', 'font_size', 'color', 'bold', 'italic', 'underline']:
+                    if key in data:
+                        layer.data[key] = data[key]
+
+            elif layer_class == 'ImageLayer':
+                pixmap = data.get('pixmap')
+                if isinstance(pixmap, dict) and '_pixmap_base64' in pixmap:
+                    pm = QPixmap()
+                    pm.loadFromData(base64.b64decode(pixmap['_pixmap_base64']))
+                    pixmap = pm
+                elif not isinstance(pixmap, QPixmap):
+                    pixmap = None
+
+                layer = ImageLayer(
+                    page_num=page_num,
+                    x=data.get('x', 0),
+                    y=data.get('y', 0),
+                    pixmap=pixmap,
+                    width=data.get('width'),
+                    height=data.get('height'),
+                    image_path=data.get('image_path')
+                )
+
+            elif layer_class == 'SymbolLayer':
+                layer = SymbolLayer(
+                    page_num=page_num,
+                    x=data.get('x', 0),
+                    y=data.get('y', 0),
+                    symbol=data.get('symbol', ''),
+                    font_size=data.get('font_size', 24)
+                )
+                if 'color' in data:
+                    layer.data['color'] = data['color']
+
+            else:
+                # Generic layer
+                layer_type_str = layer_data.get('type', 'DRAWING')
+                try:
+                    layer_type = LayerType(layer_type_str)
+                except ValueError:
+                    layer_type = LayerType.DRAWING
+
+                layer = Layer(layer_type, page_num, layer_data.get('name', 'Layer'))
+                layer.data = data
+
+            if layer:
+                # Restore common properties
+                layer.id = layer_data.get('id', layer.id)
+                layer.name = layer_data.get('name', layer.name)
+                layer.visible = layer_data.get('visible', True)
+                layer.locked = layer_data.get('locked', False)
+                layer.opacity = layer_data.get('opacity', 1.0)
+
+                if 'rotation' in layer_data and hasattr(layer, 'rotation'):
+                    layer.rotation = layer_data['rotation']
+
+                layer_manager.add_layer(layer)
+
+    @staticmethod
+    def restore_guides(guide_manager, guides_data: list):
+        """Restore guides from serialized data
+
+        Args:
+            guide_manager: The guide manager to add guides to
+            guides_data: List of guide data dicts from project file
+        """
+        if not guide_manager or not guides_data:
+            return
+
+        from core.guide_manager import GuideOrientation
+
+        guide_manager.clear_all_guides()
+
+        for guide_data in guides_data:
+            orientation_str = guide_data.get('orientation', 'horizontal')
+            try:
+                orientation = GuideOrientation(orientation_str)
+            except ValueError:
+                orientation = GuideOrientation.HORIZONTAL
+
+            guide = guide_manager.add_guide(
+                orientation=orientation,
+                position=guide_data.get('position', 0),
+                page_num=guide_data.get('page_num', -1)
+            )
+            guide.locked = guide_data.get('locked', False)

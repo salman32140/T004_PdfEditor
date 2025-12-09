@@ -237,6 +237,14 @@ class RulerWidget(QWidget):
 
     RULER_SIZE = 20  # Width/height of the ruler
 
+    # Signals for guide creation and interaction
+    guide_drag_started = pyqtSignal(float)  # Position in page points where drag started
+    guide_drag_moved = pyqtSignal(float)    # Current position during drag
+    guide_drag_ended = pyqtSignal(float)    # Final position where guide should be created
+    guide_drag_cancelled = pyqtSignal()     # Drag was cancelled (e.g., released on ruler)
+    guide_marker_clicked = pyqtSignal(object, object)  # Guide, mouse position (for selection)
+    guide_marker_right_clicked = pyqtSignal(object, object)  # Guide, global position (for context menu)
+
     def __init__(self, orientation: Qt.Orientation, parent=None):
         super().__init__(parent)
         self.orientation = orientation
@@ -249,10 +257,20 @@ class RulerWidget(QWidget):
         self.continuous_view = False  # Whether in continuous view mode
         self.page_infos = []  # List of (offset_pixels, page_width_points, page_height_points) for each page
 
+        # Guide management
+        self._guide_manager = None
+        self._is_dragging_guide = False
+        self._dragging_existing_guide = None  # Guide being repositioned
+        self._drag_start_pos = None
+        self._hover_guide = None  # Guide marker being hovered
+
         if orientation == Qt.Orientation.Horizontal:
             self.setFixedHeight(self.RULER_SIZE)
         else:
             self.setFixedWidth(self.RULER_SIZE)
+
+        # Enable mouse tracking for hover effects
+        self.setMouseTracking(True)
 
         # Background is painted in paintEvent based on theme
 
@@ -336,6 +354,9 @@ class RulerWidget(QWidget):
             self._paint_horizontal(painter, metrics, major_tick_spacing, minor_tick_spacing, tick_color, text_color)
         else:
             self._paint_vertical(painter, metrics, major_tick_spacing, minor_tick_spacing, tick_color, text_color)
+
+        # Paint guide markers on top
+        self._paint_guide_markers(painter)
 
     def _paint_horizontal(self, painter, metrics, major_spacing, minor_spacing, tick_color, text_color):
         """Paint horizontal ruler - 0 starts at each page's left edge"""
@@ -482,6 +503,248 @@ class RulerWidget(QWidget):
                             painter.drawText(char_x, char_y + metrics.ascent(), char)
 
                 y += minor_spacing
+
+    def set_guide_manager(self, guide_manager):
+        """Set the guide manager for this ruler"""
+        self._guide_manager = guide_manager
+        if guide_manager:
+            guide_manager.guides_changed.connect(self.update)
+
+    def _screen_to_page_position(self, screen_pos: int) -> float:
+        """Convert screen position to page position in points"""
+        if self.orientation == Qt.Orientation.Horizontal:
+            # For horizontal ruler, convert X position
+            page_screen_start = self.canvas_offset - self.scroll_offset
+            return (screen_pos - page_screen_start) / self.zoom
+        else:
+            # For vertical ruler, convert Y position
+            page_screen_start = self.canvas_offset - self.scroll_offset
+            return (screen_pos - page_screen_start) / self.zoom
+
+    def _page_to_screen_position(self, page_pos: float) -> int:
+        """Convert page position in points to screen position"""
+        if self.orientation == Qt.Orientation.Horizontal:
+            page_screen_start = self.canvas_offset - self.scroll_offset
+            return int(page_screen_start + page_pos * self.zoom)
+        else:
+            page_screen_start = self.canvas_offset - self.scroll_offset
+            return int(page_screen_start + page_pos * self.zoom)
+
+    def _find_guide_at_screen_pos(self, screen_pos: int, tolerance: int = 8):
+        """Find a guide marker at the given screen position"""
+        if not self._guide_manager:
+            return None
+
+        from core.guide_manager import GuideOrientation
+
+        # Determine which guides to check based on ruler orientation
+        # Horizontal ruler (top) shows VERTICAL guide markers (vertical lines have X positions)
+        # Vertical ruler (left) shows HORIZONTAL guide markers (horizontal lines have Y positions)
+        if self.orientation == Qt.Orientation.Horizontal:
+            guides = self._guide_manager.get_vertical_guides()
+        else:
+            guides = self._guide_manager.get_horizontal_guides()
+
+        for guide in guides:
+            guide_screen_pos = self._page_to_screen_position(guide.position)
+            if abs(guide_screen_pos - screen_pos) <= tolerance:
+                return guide
+        return None
+
+    def _paint_guide_markers(self, painter):
+        """Paint triangular markers for guides on the ruler"""
+        if not self._guide_manager:
+            return
+
+        from core.guide_manager import GuideOrientation
+
+        # Get guides - horizontal ruler (top) shows VERTICAL guide markers (vertical lines have X positions)
+        # Vertical ruler (left) shows HORIZONTAL guide markers (horizontal lines have Y positions)
+        if self.orientation == Qt.Orientation.Horizontal:
+            guides = self._guide_manager.get_vertical_guides()
+        else:
+            guides = self._guide_manager.get_horizontal_guides()
+
+        for guide in guides:
+            screen_pos = self._page_to_screen_position(guide.position)
+
+            # Check if marker is visible
+            if self.orientation == Qt.Orientation.Horizontal:
+                if screen_pos < -10 or screen_pos > self.width() + 10:
+                    continue
+            else:
+                if screen_pos < -10 or screen_pos > self.height() + 10:
+                    continue
+
+            # Draw triangular marker
+            is_selected = guide == self._guide_manager.selected_guide
+            is_hovered = guide == self._hover_guide
+            is_locked = self._guide_manager.is_guide_locked(guide)
+
+            # Color based on state
+            if is_locked:
+                marker_color = QColor("#FF6600")  # Orange for locked
+            elif is_selected:
+                marker_color = QColor("#00FF00")  # Bright green for selected
+            elif is_hovered:
+                marker_color = QColor("#88FF88")  # Light green for hover
+            else:
+                marker_color = QColor("#00CC00")  # Green for normal
+
+            painter.setBrush(marker_color)
+            painter.setPen(QPen(marker_color.darker(120), 1))
+
+            # Draw triangle pointing into the canvas
+            triangle_size = 8
+            if self.orientation == Qt.Orientation.Horizontal:
+                # Triangle pointing down from horizontal ruler
+                points = [
+                    QPoint(screen_pos - triangle_size // 2, self.height() - triangle_size),
+                    QPoint(screen_pos + triangle_size // 2, self.height() - triangle_size),
+                    QPoint(screen_pos, self.height())
+                ]
+            else:
+                # Triangle pointing right from vertical ruler
+                points = [
+                    QPoint(self.width() - triangle_size, screen_pos - triangle_size // 2),
+                    QPoint(self.width() - triangle_size, screen_pos + triangle_size // 2),
+                    QPoint(self.width(), screen_pos)
+                ]
+
+            painter.drawPolygon(points)
+
+    def mousePressEvent(self, event):
+        """Handle mouse press - start guide creation or select existing guide marker"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Check if clicking on existing guide marker
+            if self.orientation == Qt.Orientation.Horizontal:
+                screen_pos = int(event.position().x())
+            else:
+                screen_pos = int(event.position().y())
+
+            guide = self._find_guide_at_screen_pos(screen_pos)
+            if guide:
+                # Clicking on existing guide marker - select it for repositioning
+                if not self._guide_manager.is_guide_locked(guide):
+                    self._dragging_existing_guide = guide
+                    self._guide_manager.selected_guide = guide
+                    self.guide_marker_clicked.emit(guide, event.position())
+                self._drag_start_pos = event.position()
+                self._is_dragging_guide = True
+            else:
+                # Start creating a new guide - grab mouse to track outside ruler
+                self._is_dragging_guide = True
+                self._dragging_existing_guide = None
+                self._drag_start_pos = event.position()
+                self.grabMouse()
+                # Initial position is 0 (at ruler edge)
+                self.guide_drag_started.emit(0)
+
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+        elif event.button() == Qt.MouseButton.RightButton:
+            # Right-click on guide marker for context menu
+            if self.orientation == Qt.Orientation.Horizontal:
+                screen_pos = int(event.position().x())
+            else:
+                screen_pos = int(event.position().y())
+
+            guide = self._find_guide_at_screen_pos(screen_pos)
+            if guide:
+                self.guide_marker_right_clicked.emit(guide, self.mapToGlobal(event.position().toPoint()))
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move - update guide position during drag"""
+        if self._is_dragging_guide:
+            if self._dragging_existing_guide:
+                # Moving existing guide - use position along the ruler
+                if self.orientation == Qt.Orientation.Horizontal:
+                    screen_pos = int(event.position().x())
+                else:
+                    screen_pos = int(event.position().y())
+                page_pos = self._screen_to_page_position(screen_pos)
+                self._guide_manager.move_guide(self._dragging_existing_guide, page_pos)
+            else:
+                # Creating new guide - track perpendicular movement from ruler edge
+                # Horizontal ruler: track Y movement (how far down from ruler)
+                # Vertical ruler: track X movement (how far right from ruler)
+                # Position is purely based on distance from ruler, not document position
+                if self.orientation == Qt.Orientation.Horizontal:
+                    # Y position relative to ruler bottom edge
+                    pixels_from_ruler = int(event.position().y()) - self.height()
+                    if pixels_from_ruler < 0:
+                        pixels_from_ruler = 0
+                    # Convert to page coords: just pixels/zoom + scroll offset
+                    page_pos = (pixels_from_ruler + self.scroll_offset) / self.zoom if self.zoom > 0 else 0
+                else:
+                    # X position relative to ruler right edge
+                    pixels_from_ruler = int(event.position().x()) - self.width()
+                    if pixels_from_ruler < 0:
+                        pixels_from_ruler = 0
+                    # Convert to page coords: just pixels/zoom + scroll offset
+                    page_pos = (pixels_from_ruler + self.scroll_offset) / self.zoom if self.zoom > 0 else 0
+
+                self.guide_drag_moved.emit(max(0, page_pos))
+        else:
+            # Just hovering - check for guide markers
+            if self.orientation == Qt.Orientation.Horizontal:
+                screen_pos = int(event.position().x())
+            else:
+                screen_pos = int(event.position().y())
+
+            old_hover = self._hover_guide
+            self._hover_guide = self._find_guide_at_screen_pos(screen_pos)
+            if old_hover != self._hover_guide:
+                self.update()
+
+            # Update cursor
+            if self._hover_guide:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release - finish guide creation or repositioning"""
+        if event.button() == Qt.MouseButton.LeftButton and self._is_dragging_guide:
+            if self._dragging_existing_guide:
+                # Finished repositioning - guide already moved via move_guide
+                self._dragging_existing_guide = None
+            else:
+                # Release mouse grab
+                self.releaseMouse()
+
+                # Creating new guide - check if released into canvas area
+                if self.orientation == Qt.Orientation.Horizontal:
+                    pixels_from_ruler = int(event.position().y()) - self.height()
+                    released_on_canvas = pixels_from_ruler > 0
+                    # Convert to page coords: just pixels/zoom + scroll offset (no canvas offset)
+                    page_pos = (pixels_from_ruler + self.scroll_offset) / self.zoom if self.zoom > 0 else 0
+                else:
+                    pixels_from_ruler = int(event.position().x()) - self.width()
+                    released_on_canvas = pixels_from_ruler > 0
+                    # Convert to page coords: just pixels/zoom + scroll offset (no canvas offset)
+                    page_pos = (pixels_from_ruler + self.scroll_offset) / self.zoom if self.zoom > 0 else 0
+
+                if released_on_canvas and page_pos >= 0:
+                    self.guide_drag_ended.emit(page_pos)
+                else:
+                    self.guide_drag_cancelled.emit()
+
+            self._is_dragging_guide = False
+            self._drag_start_pos = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        """Handle mouse leaving ruler"""
+        self._hover_guide = None
+        self.update()
+        super().leaveEvent(event)
 
 
 class RulerContainer(QWidget):
@@ -650,6 +913,22 @@ class RulerContainer(QWidget):
         self.v_ruler.set_zoom(self.canvas_widget.zoom)
         # Ensure vertical ruler visibility is correct
         self._update_vertical_ruler_visibility()
+
+    def set_guide_manager(self, guide_manager):
+        """Set the guide manager for rulers and canvas"""
+        self._guide_manager = guide_manager
+
+        # Connect guide manager to rulers
+        self.h_ruler.set_guide_manager(guide_manager)
+        self.v_ruler.set_guide_manager(guide_manager)
+
+        # Connect guide manager to canvas
+        if hasattr(self.canvas_widget, 'set_guide_manager'):
+            self.canvas_widget.set_guide_manager(guide_manager)
+
+    def get_guide_manager(self):
+        """Get the guide manager"""
+        return getattr(self, '_guide_manager', None)
 
 
 class PDFTab:
@@ -1037,6 +1316,11 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
 
+        open_project_action = QAction("Open &Project...", self)
+        open_project_action.setShortcut("Ctrl+Shift+O")
+        open_project_action.triggered.connect(self.open_project)
+        file_menu.addAction(open_project_action)
+
         file_menu.addSeparator()
 
         save_action = QAction("&Save", self)
@@ -1048,6 +1332,11 @@ class MainWindow(QMainWindow):
         save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self.save_file_as)
         file_menu.addAction(save_as_action)
+
+        save_project_action = QAction("Save Pro&ject...", self)
+        save_project_action.setShortcut("Ctrl+Shift+S")
+        save_project_action.triggered.connect(self.save_project)
+        file_menu.addAction(save_project_action)
 
         file_menu.addSeparator()
 
@@ -1105,6 +1394,20 @@ class MainWindow(QMainWindow):
         fit_page_action = QAction("Fit to &Page", self)
         fit_page_action.triggered.connect(lambda: self.get_current_canvas().fit_to_page() if self.get_current_canvas() else None)
         view_menu.addAction(fit_page_action)
+
+        view_menu.addSeparator()
+
+        # Guides submenu
+        guides_menu = view_menu.addMenu("&Guides")
+
+        clear_guides_action = QAction("Clear All &Guides", self)
+        clear_guides_action.triggered.connect(self.clear_all_guides)
+        guides_menu.addAction(clear_guides_action)
+
+        self.lock_guides_action = QAction("&Lock All Guides", self)
+        self.lock_guides_action.setCheckable(True)
+        self.lock_guides_action.triggered.connect(self.toggle_guides_lock)
+        guides_menu.addAction(self.lock_guides_action)
 
         # Page menu
         page_menu = menubar.addMenu("&Page")
@@ -1349,8 +1652,14 @@ class MainWindow(QMainWindow):
 
     def create_new_tab(self, file_path=None, title="Untitled"):
         """Create a new tab with a PDF document"""
+        from core.guide_manager import GuideManager
+
         tab = PDFTab(self)
         self.tabs.append(tab)
+
+        # Create and set guide manager for this tab
+        tab.guide_manager = GuideManager()
+        tab.ruler_container.set_guide_manager(tab.guide_manager)
 
         # Add to tab widget (use ruler_container which wraps the scroll area)
         tab_index = self.tab_widget.addTab(tab.ruler_container, title)
@@ -1362,6 +1671,9 @@ class MainWindow(QMainWindow):
 
         # Connect canvas signals
         self.connect_tab_signals(tab)
+
+        # Connect ruler guide signals
+        self.connect_ruler_guide_signals(tab)
 
         return tab
 
@@ -1375,6 +1687,115 @@ class MainWindow(QMainWindow):
         canvas.text_field_selected.connect(self.on_text_field_selected)
         canvas.text_field_deselected.connect(self.on_text_field_deselected)
         canvas.color_used.connect(self.on_color_used)
+        canvas.multi_layer_selection_changed.connect(self.on_multi_layer_selection_changed)
+
+    def connect_ruler_guide_signals(self, tab: PDFTab):
+        """Connect ruler signals for guide creation and management"""
+        from core.guide_manager import GuideOrientation
+
+        ruler_container = tab.ruler_container
+        h_ruler = ruler_container.h_ruler
+        v_ruler = ruler_container.v_ruler
+        canvas = tab.canvas_widget
+        guide_manager = tab.guide_manager
+
+        # Horizontal ruler (top) - drag down creates HORIZONTAL guide (line going left-right)
+        def on_h_ruler_drag_started(pos):
+            canvas.set_guide_preview(GuideOrientation.HORIZONTAL, pos)
+
+        def on_h_ruler_drag_moved(pos):
+            canvas.set_guide_preview(GuideOrientation.HORIZONTAL, pos)
+
+        def on_h_ruler_drag_ended(pos):
+            canvas.clear_guide_preview()
+            # Create horizontal guide at this Y position
+            guide_manager.add_guide(GuideOrientation.HORIZONTAL, pos, page_num=-1)
+
+        def on_h_ruler_drag_cancelled():
+            canvas.clear_guide_preview()
+
+        h_ruler.guide_drag_started.connect(on_h_ruler_drag_started)
+        h_ruler.guide_drag_moved.connect(on_h_ruler_drag_moved)
+        h_ruler.guide_drag_ended.connect(on_h_ruler_drag_ended)
+        h_ruler.guide_drag_cancelled.connect(on_h_ruler_drag_cancelled)
+        h_ruler.guide_marker_right_clicked.connect(lambda g, p: self.show_guide_context_menu(g, p, tab))
+
+        # Vertical ruler (left) - drag right creates VERTICAL guide (line going top-bottom)
+        def on_v_ruler_drag_started(pos):
+            canvas.set_guide_preview(GuideOrientation.VERTICAL, pos)
+
+        def on_v_ruler_drag_moved(pos):
+            canvas.set_guide_preview(GuideOrientation.VERTICAL, pos)
+
+        def on_v_ruler_drag_ended(pos):
+            canvas.clear_guide_preview()
+            # Create vertical guide at this X position
+            guide_manager.add_guide(GuideOrientation.VERTICAL, pos, page_num=-1)
+
+        def on_v_ruler_drag_cancelled():
+            canvas.clear_guide_preview()
+
+        v_ruler.guide_drag_started.connect(on_v_ruler_drag_started)
+        v_ruler.guide_drag_moved.connect(on_v_ruler_drag_moved)
+        v_ruler.guide_drag_ended.connect(on_v_ruler_drag_ended)
+        v_ruler.guide_drag_cancelled.connect(on_v_ruler_drag_cancelled)
+        v_ruler.guide_marker_right_clicked.connect(lambda g, p: self.show_guide_context_menu(g, p, tab))
+
+    def show_guide_context_menu(self, guide, pos, tab):
+        """Show context menu for a guide"""
+        menu = QMenu(self)
+
+        # Lock/Unlock action
+        is_locked = tab.guide_manager.is_guide_locked(guide)
+        if tab.guide_manager.all_locked:
+            lock_action = menu.addAction("Unlock All Guides")
+            lock_action.triggered.connect(lambda: self.toggle_all_guides_lock(tab))
+        elif guide.locked:
+            lock_action = menu.addAction("Unlock Guide")
+            lock_action.triggered.connect(lambda: tab.guide_manager.toggle_guide_lock(guide))
+        else:
+            lock_action = menu.addAction("Lock Guide")
+            lock_action.triggered.connect(lambda: tab.guide_manager.toggle_guide_lock(guide))
+
+        menu.addSeparator()
+
+        # Delete action
+        delete_action = menu.addAction("Remove Guide")
+        delete_action.triggered.connect(lambda: tab.guide_manager.remove_guide(guide))
+
+        menu.addSeparator()
+
+        # Clear all guides
+        clear_action = menu.addAction("Clear All Guides")
+        clear_action.triggered.connect(lambda: tab.guide_manager.clear_all_guides())
+
+        menu.addSeparator()
+
+        # Lock all guides
+        lock_all_action = menu.addAction("Lock All Guides" if not tab.guide_manager.all_locked else "Unlock All Guides")
+        lock_all_action.triggered.connect(lambda: self.toggle_all_guides_lock(tab))
+
+        menu.exec(pos)
+
+    def toggle_all_guides_lock(self, tab):
+        """Toggle lock state for all guides"""
+        tab.guide_manager.all_locked = not tab.guide_manager.all_locked
+
+    def clear_all_guides(self):
+        """Clear all guides from the current document"""
+        tab = self.current_tab
+        if tab and hasattr(tab, 'guide_manager'):
+            tab.guide_manager.clear_all_guides()
+            self.statusBar().showMessage("All guides cleared", 3000)
+
+    def toggle_guides_lock(self):
+        """Toggle lock state for all guides (menu action)"""
+        tab = self.current_tab
+        if tab and hasattr(tab, 'guide_manager'):
+            tab.guide_manager.all_locked = not tab.guide_manager.all_locked
+            self.lock_guides_action.setChecked(tab.guide_manager.all_locked)
+            state = "locked" if tab.guide_manager.all_locked else "unlocked"
+            self.statusBar().showMessage(f"All guides {state}", 3000)
 
     def connect_panel_signals(self):
         """Connect panel signals to current tab"""
@@ -1448,6 +1869,10 @@ class MainWindow(QMainWindow):
             if hasattr(self, '_fit_to_screen_enabled'):
                 self._reset_fit_to_screen_state()
 
+            # Sync guide lock state
+            if hasattr(self, 'lock_guides_action') and hasattr(tab, 'guide_manager'):
+                self.lock_guides_action.setChecked(tab.guide_manager.all_locked)
+
             # Update window title
             if tab.file_path:
                 self.setWindowTitle(f"PDF Editor - {os.path.basename(tab.file_path)}")
@@ -1512,6 +1937,7 @@ class MainWindow(QMainWindow):
         self.properties_panel.layer_copied.connect(self.on_layer_copied)
         self.properties_panel.layer_edit_requested.connect(self.on_layer_edit_requested)
         self.properties_panel.text_annotation_requested.connect(self.on_text_annotation_requested)
+        self.properties_panel.align_layers_requested.connect(self.on_align_layers_requested)
 
     def on_layer_deleted(self, layer_id):
         """Handle layer deletion from properties panel"""
@@ -1701,6 +2127,146 @@ class MainWindow(QMainWindow):
             else:
                 print("✗ Error saving file")
                 self.status_bar.showMessage("Error saving file")
+
+    def save_project(self):
+        """Save current document as a project file (.pdfproj) with layers and guides"""
+        from utils.export import ProjectManager
+
+        tab = self.current_tab
+        if not tab or not tab.pdf_doc or not tab.pdf_doc.doc:
+            QMessageBox.warning(self, "No Document", "Please open a PDF document first.")
+            return
+
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Project",
+            "",
+            f"PDF Project Files (*{ProjectManager.PROJECT_EXTENSION})"
+        )
+
+        if file_name:
+            if not file_name.endswith(ProjectManager.PROJECT_EXTENSION):
+                file_name += ProjectManager.PROJECT_EXTENSION
+
+            # Get guide manager for current tab
+            guide_manager = getattr(tab, 'guide_manager', None)
+
+            # Save the project
+            success = ProjectManager.save_project(
+                output_path=file_name,
+                pdf_doc=tab.pdf_doc,
+                layer_manager=tab.layer_manager,
+                guide_manager=guide_manager,
+                settings={
+                    'current_page': tab.canvas_widget.current_page if tab.canvas_widget else 0,
+                    'zoom': tab.canvas_widget.zoom if tab.canvas_widget else 1.0
+                }
+            )
+
+            if success:
+                tab.project_path = file_name
+                self.status_bar.showMessage(f"Project saved: {file_name}")
+            else:
+                QMessageBox.critical(self, "Error", "Failed to save project file")
+
+    def open_project(self):
+        """Open a project file (.pdfproj) with layers and guides"""
+        from utils.export import ProjectManager
+        from core.guide_manager import GuideOrientation
+
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            "",
+            f"PDF Project Files (*{ProjectManager.PROJECT_EXTENSION})"
+        )
+
+        if not file_name:
+            return
+
+        # Check if project is already open
+        for i, tab in enumerate(self.tabs):
+            if hasattr(tab, 'project_path') and tab.project_path == file_name:
+                self.tab_widget.setCurrentIndex(i)
+                self.status_bar.showMessage(f"Switched to already open project: {file_name}")
+                return
+
+        # Load the project
+        project_data = ProjectManager.load_project(file_name)
+        if not project_data:
+            QMessageBox.critical(self, "Error", "Failed to open project file")
+            return
+
+        try:
+            # Create new tab
+            tab = self.create_new_tab(title=os.path.basename(file_name))
+            tab.project_path = file_name
+
+            # Open the extracted PDF
+            pdf_path = project_data['pdf_path']
+            if tab.pdf_doc.open(pdf_path):
+                tab.file_path = pdf_path  # Temporary path
+
+                # Restore layers
+                if project_data.get('layers'):
+                    ProjectManager.restore_layers(tab.layer_manager, project_data['layers'])
+                    print(f"  → Restored {len(project_data['layers'])} layers")
+
+                # Restore guides
+                if project_data.get('guides') and hasattr(tab, 'guide_manager'):
+                    ProjectManager.restore_guides(tab.guide_manager, project_data['guides'])
+                    print(f"  → Restored {len(project_data['guides'])} guides")
+
+                # Restore settings
+                settings = project_data.get('settings', {})
+
+                # Update panels
+                self.thumbnail_panel.pdf_doc = tab.pdf_doc
+                self.thumbnail_panel.load_thumbnails()
+                self.properties_panel.layer_manager = tab.layer_manager
+                self.properties_panel.refresh_layers()
+                self.ai_chat_widget.set_document(tab.pdf_doc)
+
+                # Connect panel signals
+                self.connect_panel_signals()
+
+                # Set page from settings
+                current_page = settings.get('current_page', 0)
+                tab.canvas_widget.set_page(current_page)
+
+                # Set zoom from settings
+                zoom = settings.get('zoom', 1.0)
+                tab.canvas_widget.set_zoom(zoom)
+
+                # Update rulers
+                tab.ruler_container.update_rulers()
+
+                # Update zoom display
+                zoom_percent = int(tab.canvas_widget.zoom * 100)
+                self.zoom_combo.setCurrentText(f"{zoom_percent}%")
+
+                self.setWindowTitle(f"PDF Editor - {os.path.basename(file_name)}")
+                self.status_bar.showMessage(f"Opened project: {file_name}")
+
+            else:
+                # Remove failed tab
+                self.close_tab(self.current_tab_index)
+                QMessageBox.critical(self, "Error", "Failed to open PDF from project")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
+
+        finally:
+            # Clean up temp directory
+            temp_dir = project_data.get('temp_dir')
+            if temp_dir and os.path.exists(temp_dir):
+                import shutil
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass  # Ignore cleanup errors
 
     def export_flattened(self):
         """Export with flattened annotations - CONVERTS TO IMAGES"""
@@ -1903,38 +2469,62 @@ class MainWindow(QMainWindow):
         """Show page context menu"""
         menu = QMenu(self)
 
+        # Get selected pages from thumbnail panel
+        selected_pages = self.thumbnail_panel.get_selected_pages()
+        multi_select = len(selected_pages) > 1
+
+        # If clicked page is not in selection, treat as single page operation
+        if page_num not in selected_pages:
+            selected_pages = [page_num]
+            multi_select = False
+
         insert_action = menu.addAction("Insert Page Here")
         insert_action.triggered.connect(lambda: self.insert_page_at(page_num))
 
-        # Move page up (disabled if already first page)
-        move_up_action = menu.addAction("Move Page Up")
-        move_up_action.triggered.connect(lambda: self.move_page_up(page_num))
-        if page_num == 0:
-            move_up_action.setEnabled(False)
+        if not multi_select:
+            # Move page up (disabled if already first page)
+            move_up_action = menu.addAction("Move Page Up")
+            move_up_action.triggered.connect(lambda: self.move_page_up(page_num))
+            if page_num == 0:
+                move_up_action.setEnabled(False)
 
-        # Move page down (disabled if already last page)
-        move_down_action = menu.addAction("Move Page Down")
-        move_down_action.triggered.connect(lambda: self.move_page_down(page_num))
-        if self.pdf_doc and page_num >= self.pdf_doc.page_count - 1:
-            move_down_action.setEnabled(False)
-
-        menu.addSeparator()
-
-        delete_action = menu.addAction("Delete Page")
-        delete_action.triggered.connect(lambda: self.delete_page_at(page_num))
+            # Move page down (disabled if already last page)
+            move_down_action = menu.addAction("Move Page Down")
+            move_down_action.triggered.connect(lambda: self.move_page_down(page_num))
+            if self.pdf_doc and page_num >= self.pdf_doc.page_count - 1:
+                move_down_action.setEnabled(False)
 
         menu.addSeparator()
 
-        rotate_cw = menu.addAction("Rotate Clockwise")
-        rotate_cw.triggered.connect(lambda: self.rotate_page_at(page_num, 90))
-
-        rotate_ccw = menu.addAction("Rotate Counter-Clockwise")
-        rotate_ccw.triggered.connect(lambda: self.rotate_page_at(page_num, -90))
+        if multi_select:
+            # Multi-page delete
+            delete_action = menu.addAction(f"Delete {len(selected_pages)} Pages")
+            delete_action.triggered.connect(lambda: self.delete_selected_pages(selected_pages))
+        else:
+            delete_action = menu.addAction("Delete Page")
+            delete_action.triggered.connect(lambda: self.delete_page_at(page_num))
 
         menu.addSeparator()
 
-        duplicate_action = menu.addAction("Duplicate Page")
-        duplicate_action.triggered.connect(lambda: self.duplicate_page_at(page_num))
+        if multi_select:
+            # Multi-page rotate
+            rotate_cw = menu.addAction(f"Rotate {len(selected_pages)} Pages Clockwise")
+            rotate_cw.triggered.connect(lambda: self.rotate_selected_pages(selected_pages, 90))
+
+            rotate_ccw = menu.addAction(f"Rotate {len(selected_pages)} Pages Counter-Clockwise")
+            rotate_ccw.triggered.connect(lambda: self.rotate_selected_pages(selected_pages, -90))
+        else:
+            rotate_cw = menu.addAction("Rotate Clockwise")
+            rotate_cw.triggered.connect(lambda: self.rotate_page_at(page_num, 90))
+
+            rotate_ccw = menu.addAction("Rotate Counter-Clockwise")
+            rotate_ccw.triggered.connect(lambda: self.rotate_page_at(page_num, -90))
+
+        menu.addSeparator()
+
+        if not multi_select:
+            duplicate_action = menu.addAction("Duplicate Page")
+            duplicate_action.triggered.connect(lambda: self.duplicate_page_at(page_num))
 
         menu.exec(pos)
 
@@ -1952,6 +2542,50 @@ class MainWindow(QMainWindow):
         self.pdf_doc.delete_page(page_num)
         self.layer_manager.clear_page(page_num)
         self.thumbnail_panel.refresh(block_context_menu=True)
+
+    def delete_selected_pages(self, pages: list):
+        """Delete multiple selected pages at once"""
+        if not self.pdf_doc:
+            return
+
+        # Check if we would delete all pages
+        if len(pages) >= self.pdf_doc.page_count:
+            QMessageBox.warning(self, "Warning", "Cannot delete all pages. At least one page must remain.")
+            return
+
+        # Ask for confirmation once
+        reply = QMessageBox.question(
+            self, "Delete Pages",
+            f"Are you sure you want to delete {len(pages)} pages?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Delete pages in reverse order to avoid index shifting issues
+        for page_num in sorted(pages, reverse=True):
+            if self.pdf_doc.page_count > 1:  # Safety check
+                self.pdf_doc.delete_page(page_num)
+                self.layer_manager.clear_page(page_num)
+
+        self.thumbnail_panel.refresh(block_context_menu=True)
+        self.statusBar().showMessage(f"Deleted {len(pages)} pages", 3000)
+
+    def rotate_selected_pages(self, pages: list, rotation: int):
+        """Rotate multiple selected pages"""
+        if not self.pdf_doc:
+            return
+
+        for page_num in pages:
+            page = self.pdf_doc.get_page(page_num)
+            if page:
+                new_rotation = (page.rotation + rotation) % 360
+                self.pdf_doc.rotate_page(page_num, new_rotation)
+
+        self.thumbnail_panel.refresh(block_context_menu=True)
+        direction = "clockwise" if rotation > 0 else "counter-clockwise"
+        self.statusBar().showMessage(f"Rotated {len(pages)} pages {direction}", 3000)
 
     def rotate_page_at(self, page_num: int, rotation: int):
         """Rotate specific page"""
@@ -2235,6 +2869,15 @@ class MainWindow(QMainWindow):
         if hasattr(self.properties_panel, 'hide_text_field_properties'):
             self.properties_panel.hide_text_field_properties()
 
+    def on_multi_layer_selection_changed(self, count: int):
+        """Handle multi-layer selection change"""
+        self.properties_panel.set_multi_layer_selection(count)
+
+    def on_align_layers_requested(self, align_type: str):
+        """Handle layer alignment request from properties panel"""
+        canvas = self.get_current_canvas()
+        if canvas:
+            canvas.align_selected_layers(align_type)
 
     def apply_settings(self):
         """Apply saved settings"""

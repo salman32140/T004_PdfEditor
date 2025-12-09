@@ -24,6 +24,7 @@ class InteractivePDFCanvas(PDFCanvasWidget):
     text_field_deselected = pyqtSignal()
     text_selection_changed = pyqtSignal(bool)  # Emits True when text is selected, False otherwise
     color_used = pyqtSignal(str)  # Emits when a color is used (from dialogs like symbol, text, etc.)
+    multi_layer_selection_changed = pyqtSignal(int)  # Emits count of selected layers (for alignment UI)
 
     def __init__(self, pdf_doc, layer_manager, history_manager):
         super().__init__(pdf_doc, layer_manager, history_manager)
@@ -89,6 +90,11 @@ class InteractivePDFCanvas(PDFCanvasWidget):
         # Left click - check tool first, then layer selection
         if event.button() == Qt.MouseButton.LeftButton:
             widget_point = QPointF(event.position().x(), event.position().y())
+
+            # In continuous view, adjust widget_point to be relative to current page
+            if self.continuous_view:
+                page_y_offset = self.get_page_y_offset(self.current_page)
+                widget_point = QPointF(event.position().x(), event.position().y() - page_y_offset)
 
             # HIGHEST PRIORITY: If hovering over resize handle, start resizing immediately
             if self.hovering_resize_handle != ResizeHandle.NONE:
@@ -274,7 +280,12 @@ class InteractivePDFCanvas(PDFCanvasWidget):
         self.hovering_rotation_handle = False
         self.hovering_resize_handle = ResizeHandle.NONE
         from tools.selection_tool import SelectionTool
+
+        # In continuous view, adjust widget_point to be relative to current page
         widget_point = QPointF(widget_pos.x(), widget_pos.y())
+        if self.continuous_view:
+            page_y_offset = self.get_page_y_offset(self.current_page)
+            widget_point = QPointF(widget_pos.x(), widget_pos.y() - page_y_offset)
 
         # Helper function to get resize cursor based on handle
         def get_resize_cursor(handle: ResizeHandle) -> Qt.CursorShape:
@@ -419,6 +430,9 @@ class InteractivePDFCanvas(PDFCanvasWidget):
 
                         # Clear the box selection state
                         self.current_tool.clear_box_selection()
+
+                        # Emit multi-layer selection changed signal
+                        self.multi_layer_selection_changed.emit(len(selected_layers))
 
                     self.update()
                 return
@@ -663,6 +677,9 @@ class InteractivePDFCanvas(PDFCanvasWidget):
         if self.selected_layer:
             self.selected_layer = None
             self.text_field_deselected.emit()
+
+        # Emit signal to hide alignment UI
+        self.multi_layer_selection_changed.emit(0)
 
     def find_layers_in_box(self, selection_box):
         """Find all interactive layers within the selection box"""
@@ -1035,6 +1052,106 @@ class InteractivePDFCanvas(PDFCanvasWidget):
         elif self.selected_layer:
             # Fallback to single selection
             self.delete_selected_layer()
+
+        self.update()
+
+    def align_selected_layers(self, align_type: str):
+        """Align selected layers based on alignment type
+
+        Args:
+            align_type: One of 'top', 'bottom', 'left', 'right', 'h-center', 'v-center', 'v-spacing'
+        """
+        from tools.selection_tool import SelectionTool
+
+        # Get selected layers from selection tool
+        if not isinstance(self.current_tool, SelectionTool) or len(self.current_tool.selected_layers) < 2:
+            return
+
+        layers = self.current_tool.selected_layers
+
+        # Get bounds for each layer
+        layer_bounds = []
+        for layer in layers:
+            if hasattr(layer, 'data'):
+                x = layer.data.get('x', 0)
+                y = layer.data.get('y', 0)
+                width = layer.data.get('width', 0)
+                height = layer.data.get('height', 0)
+                layer_bounds.append({
+                    'layer': layer,
+                    'x': x,
+                    'y': y,
+                    'width': width,
+                    'height': height,
+                    'right': x + width,
+                    'bottom': y + height,
+                    'center_x': x + width / 2,
+                    'center_y': y + height / 2
+                })
+
+        if not layer_bounds:
+            return
+
+        if align_type == 'left':
+            # Align all layers to the leftmost edge
+            min_x = min(b['x'] for b in layer_bounds)
+            for b in layer_bounds:
+                b['layer'].data['x'] = min_x
+
+        elif align_type == 'right':
+            # Align all layers to the rightmost edge
+            max_right = max(b['right'] for b in layer_bounds)
+            for b in layer_bounds:
+                b['layer'].data['x'] = max_right - b['width']
+
+        elif align_type == 'top':
+            # Align all layers to the topmost edge
+            min_y = min(b['y'] for b in layer_bounds)
+            for b in layer_bounds:
+                b['layer'].data['y'] = min_y
+
+        elif align_type == 'bottom':
+            # Align all layers to the bottommost edge
+            max_bottom = max(b['bottom'] for b in layer_bounds)
+            for b in layer_bounds:
+                b['layer'].data['y'] = max_bottom - b['height']
+
+        elif align_type == 'h-center':
+            # Center all layers horizontally (align to shared vertical axis)
+            avg_center_x = sum(b['center_x'] for b in layer_bounds) / len(layer_bounds)
+            for b in layer_bounds:
+                b['layer'].data['x'] = avg_center_x - b['width'] / 2
+
+        elif align_type == 'v-center':
+            # Center all layers vertically (align to shared horizontal axis)
+            avg_center_y = sum(b['center_y'] for b in layer_bounds) / len(layer_bounds)
+            for b in layer_bounds:
+                b['layer'].data['y'] = avg_center_y - b['height'] / 2
+
+        elif align_type == 'v-spacing':
+            # Distribute layers evenly along vertical axis
+            if len(layer_bounds) < 2:
+                return
+
+            # Sort by Y position
+            layer_bounds.sort(key=lambda b: b['y'])
+
+            # Get top of first layer and bottom of last layer
+            top_y = layer_bounds[0]['y']
+            bottom_y = layer_bounds[-1]['bottom']
+
+            # Calculate total height of all layers
+            total_height = sum(b['height'] for b in layer_bounds)
+
+            # Calculate spacing between layers
+            available_space = (bottom_y - top_y) - total_height
+            spacing = available_space / (len(layer_bounds) - 1) if len(layer_bounds) > 1 else 0
+
+            # Position each layer
+            current_y = top_y
+            for b in layer_bounds:
+                b['layer'].data['y'] = current_y
+                current_y += b['height'] + spacing
 
         self.update()
 

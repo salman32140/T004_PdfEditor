@@ -261,6 +261,7 @@ class PropertiesPanel(QWidget):
     layer_renamed = pyqtSignal(str, str)  # layer_id, new_name
     highlight_color_changed = pyqtSignal(str)  # For text selection tool
     text_annotation_requested = pyqtSignal(str, str)  # annotation_type, color
+    align_layers_requested = pyqtSignal(str)  # alignment_type: 'top', 'bottom', 'left', 'right', 'h-center', 'v-center', 'v-spacing'
 
     def __init__(self, layer_manager: LayerManager):
         super().__init__()
@@ -430,6 +431,61 @@ class PropertiesPanel(QWidget):
         annotation_layout.addLayout(apply_layout)
         tool_layout.addWidget(self.text_annotation_row)
         self.text_annotation_row.hide()  # Hidden by default
+
+        # Alignment section (shown when multiple layers are selected with selection tool)
+        self.alignment_row = QWidget()
+        alignment_layout = QVBoxLayout(self.alignment_row)
+        alignment_layout.setContentsMargins(0, 5, 0, 5)
+        alignment_layout.setSpacing(4)
+
+        # Alignment label
+        align_label = QLabel("Align Layers:")
+        align_label.setStyleSheet("font-size: 11px; color: #888;")
+        alignment_layout.addWidget(align_label)
+
+        # Alignment buttons row
+        align_buttons_layout = QHBoxLayout()
+        align_buttons_layout.setSpacing(4)
+
+        # Create alignment buttons
+        alignment_buttons = [
+            ("align-left", "Align Left", "left"),
+            ("align-horizontal-center", "Align Horizontal Center", "h-center"),
+            ("align-right", "Align Right", "right"),
+            ("align-top", "Align Top", "top"),
+            ("align-vertical-center", "Align Vertical Center", "v-center"),
+            ("align-bottom", "Align Bottom", "bottom"),
+            ("align-vertical-spacing", "Distribute Vertically", "v-spacing"),
+        ]
+
+        for icon_name, tooltip, align_type in alignment_buttons:
+            btn = QPushButton()
+            btn.setFixedSize(26, 26)
+            btn.setIcon(get_icon(icon_name))
+            btn.setIconSize(QSize(18, 18))
+            btn.setToolTip(tooltip)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: 1px solid #555;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    border: 1px solid #00c000;
+                    background-color: rgba(0, 192, 0, 0.1);
+                }
+                QPushButton:pressed {
+                    background-color: rgba(0, 192, 0, 0.2);
+                }
+            """)
+            btn.clicked.connect(lambda checked, t=align_type: self._on_align_clicked(t))
+            align_buttons_layout.addWidget(btn)
+
+        align_buttons_layout.addStretch()
+        alignment_layout.addLayout(align_buttons_layout)
+        tool_layout.addWidget(self.alignment_row)
+        self.alignment_row.hide()  # Hidden by default
 
         tool_group.setLayout(tool_layout)
         layout.addWidget(tool_group)
@@ -820,3 +876,18 @@ class PropertiesPanel(QWidget):
 
         self.layer_deleted.emit(layer_id)
         self.refresh_layers()
+
+    def set_multi_layer_selection(self, count: int):
+        """Show or hide alignment options based on multi-layer selection count
+
+        Args:
+            count: Number of selected layers (show alignment if >= 2)
+        """
+        if count >= 2:
+            self.alignment_row.show()
+        else:
+            self.alignment_row.hide()
+
+    def _on_align_clicked(self, align_type: str):
+        """Handle alignment button click"""
+        self.align_layers_requested.emit(align_type)

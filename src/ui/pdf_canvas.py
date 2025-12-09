@@ -41,6 +41,10 @@ class PDFCanvasWidget(QWidget):
         self.continuous_view = True  # Enabled by default
         self.page_offsets = []  # Y offsets for each page in continuous view
 
+        # Guide manager for non-printing guides
+        self._guide_manager = None
+        self._dragging_guide_preview = None  # (orientation, position) during drag from ruler
+
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -235,6 +239,82 @@ class PDFCanvasWidget(QWidget):
                 painter.restore()
             else:
                 self.current_tool.draw_preview(painter, self.zoom)
+
+        # Draw guides on top of everything (non-printing visual aids)
+        self._paint_guides(painter)
+
+    def _paint_guides(self, painter: QPainter):
+        """Paint non-printing guides on the canvas
+
+        Guides span the full canvas width/height, starting from ruler edge (position 0)
+        regardless of where the document is positioned.
+        """
+        if not self._guide_manager:
+            return
+
+        from core.guide_manager import GuideOrientation
+
+        # Guide color - bright green
+        guide_color = QColor("#00FF00")
+        selected_color = QColor("#FFFF00")  # Yellow for selected guide
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)  # Crisp lines
+
+        # Get full canvas dimensions for guide lines
+        canvas_width = self.width()
+        canvas_height = self.height()
+
+        # Get guides for current page (or all pages in continuous view)
+        if self.continuous_view:
+            guides = set()
+            for page_num in range(self.pdf_doc.page_count):
+                guides.update(self._guide_manager.get_guides_for_page(page_num))
+        else:
+            guides = self._guide_manager.get_guides_for_page(self.current_page)
+
+        for guide in guides:
+            is_selected = guide == self._guide_manager.selected_guide
+            color = selected_color if is_selected else guide_color
+            pen = QPen(color, 1, Qt.PenStyle.SolidLine)
+            painter.setPen(pen)
+
+            if guide.orientation == GuideOrientation.HORIZONTAL:
+                # Horizontal guide - line across entire canvas at Y position
+                screen_y = int(guide.position * self.zoom)
+                painter.drawLine(0, screen_y, canvas_width, screen_y)
+            else:
+                # Vertical guide - line down entire canvas at X position
+                screen_x = int(guide.position * self.zoom)
+                painter.drawLine(screen_x, 0, screen_x, canvas_height)
+
+        # Draw guide preview during drag from ruler
+        if self._dragging_guide_preview:
+            orientation, position = self._dragging_guide_preview
+            pen = QPen(QColor("#00FF00"), 2, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+
+            if orientation == GuideOrientation.HORIZONTAL:
+                screen_y = int(position * self.zoom)
+                painter.drawLine(0, screen_y, canvas_width, screen_y)
+            else:
+                screen_x = int(position * self.zoom)
+                painter.drawLine(screen_x, 0, screen_x, canvas_height)
+
+    def set_guide_manager(self, guide_manager):
+        """Set the guide manager for this canvas"""
+        self._guide_manager = guide_manager
+        if guide_manager:
+            guide_manager.guides_changed.connect(self.update)
+
+    def set_guide_preview(self, orientation, position):
+        """Set a guide preview position (during drag from ruler)"""
+        self._dragging_guide_preview = (orientation, position) if position is not None else None
+        self.update()
+
+    def clear_guide_preview(self):
+        """Clear the guide preview"""
+        self._dragging_guide_preview = None
+        self.update()
 
     def _paint_single_page(self, painter: QPainter):
         """Paint a single page (non-continuous mode)"""
