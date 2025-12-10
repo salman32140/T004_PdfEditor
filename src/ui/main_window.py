@@ -16,11 +16,13 @@ from tools import (PenTool, RectangleTool, EllipseTool,
 from tools.interactive_text_tool import InteractiveTextTool
 from tools.interactive_image_tool import InteractiveImageTool
 from tools.symbol_tool import SymbolTool
+from tools.cut_tool import CutTool
 from .interactive_canvas import InteractivePDFCanvas
 from .text_edit_dialog import TextEditDialog
 from .thumbnail_panel import ThumbnailPanel
 from .properties_panel import PropertiesPanel
 from .ai_chat_widget import AIChatWidget
+from .merge_dialog import MergePDFDialog
 from utils.settings import Settings
 from utils.export import PDFExporter
 from utils.icon_helper import get_icon
@@ -511,24 +513,24 @@ class RulerWidget(QWidget):
             guide_manager.guides_changed.connect(self.update)
 
     def _screen_to_page_position(self, screen_pos: int) -> float:
-        """Convert screen position to page position in points"""
-        if self.orientation == Qt.Orientation.Horizontal:
-            # For horizontal ruler, convert X position
-            page_screen_start = self.canvas_offset - self.scroll_offset
-            return (screen_pos - page_screen_start) / self.zoom
-        else:
-            # For vertical ruler, convert Y position
-            page_screen_start = self.canvas_offset - self.scroll_offset
-            return (screen_pos - page_screen_start) / self.zoom
+        """Convert screen position on ruler to guide position
+
+        Guides are relative to the ruler edge (position 0 at ruler), not document position.
+        So we only apply zoom and scroll offset, not canvas_offset.
+        """
+        # Guide position is relative to ruler edge, not document
+        # page_pos = (screen_pos + scroll_offset) / zoom
+        return (screen_pos + self.scroll_offset) / self.zoom if self.zoom > 0 else 0
 
     def _page_to_screen_position(self, page_pos: float) -> int:
-        """Convert page position in points to screen position"""
-        if self.orientation == Qt.Orientation.Horizontal:
-            page_screen_start = self.canvas_offset - self.scroll_offset
-            return int(page_screen_start + page_pos * self.zoom)
-        else:
-            page_screen_start = self.canvas_offset - self.scroll_offset
-            return int(page_screen_start + page_pos * self.zoom)
+        """Convert guide position to screen position on the ruler
+
+        Guides are relative to the ruler edge (position 0 at ruler), not document position.
+        So we only apply zoom and scroll offset, not canvas_offset.
+        """
+        # Guide position is relative to ruler edge, not document
+        # screen_pos = page_pos * zoom - scroll_offset
+        return int(page_pos * self.zoom - self.scroll_offset)
 
     def _find_guide_at_screen_pos(self, screen_pos: int, tolerance: int = 8):
         """Find a guide marker at the given screen position"""
@@ -1057,7 +1059,8 @@ class MainWindow(QMainWindow):
             'arrow': ArrowTool(),
             'text': InteractiveTextTool(),
             'image': InteractiveImageTool(),
-            'symbol': SymbolTool()
+            'symbol': SymbolTool(),
+            'cut': CutTool()
         }
 
         self.current_tool = None
@@ -1460,6 +1463,12 @@ class MainWindow(QMainWindow):
         save_btn.triggered.connect(self.save_file)
         toolbar.addAction(save_btn)
 
+        # Merge PDF button
+        merge_btn = QAction(get_icon("merge"), "Merge PDFs", self)
+        merge_btn.setToolTip("Merge multiple PDF files")
+        merge_btn.triggered.connect(self.show_merge_dialog)
+        toolbar.addAction(merge_btn)
+
         # Ruler toggle
         self.ruler_action = QAction(get_icon("ruler"), "Toggle Rulers", self)
         self.ruler_action.setToolTip("Show/Hide Rulers")
@@ -1509,6 +1518,9 @@ class MainWindow(QMainWindow):
         export_image_action = print_menu.addAction(get_icon("image"), "Export Page as Image (PNG/JPG)")
         export_image_action.triggered.connect(self.export_page_as_image)
 
+        export_all_images_action = print_menu.addAction(get_icon("image"), "Export All Pages as Images")
+        export_all_images_action.triggered.connect(self.export_all_pages_as_images)
+
         print_btn.setMenu(print_menu)
         toolbar.addWidget(print_btn)
 
@@ -1535,6 +1547,14 @@ class MainWindow(QMainWindow):
         select_btn.triggered.connect(lambda: self.set_tool('select'))
         toolbar.addAction(select_btn)
         self.tool_icon_mapping['select'] = 'edit'
+
+        # Cut tool - Select region and copy to clipboard
+        cut_btn = QAction(get_icon("cut"), "Cut", self)
+        cut_btn.setToolTip("Cut - Select region to copy to clipboard. Right-click to insert as image.")
+        cut_btn.setCheckable(True)
+        cut_btn.triggered.connect(lambda: self.set_tool('cut'))
+        toolbar.addAction(cut_btn)
+        self.tool_icon_mapping['cut'] = 'cut'
 
         toolbar.addSeparator()
 
@@ -1688,6 +1708,7 @@ class MainWindow(QMainWindow):
         canvas.text_field_deselected.connect(self.on_text_field_deselected)
         canvas.color_used.connect(self.on_color_used)
         canvas.multi_layer_selection_changed.connect(self.on_multi_layer_selection_changed)
+        canvas.layer_content_changed.connect(self.on_layer_content_changed)
 
     def connect_ruler_guide_signals(self, tab: PDFTab):
         """Connect ruler signals for guide creation and management"""
@@ -2010,6 +2031,11 @@ class MainWindow(QMainWindow):
                 tool.pdf_doc = tab.pdf_doc
                 tool.set_highlight_color(self.properties_panel.get_highlight_color())
 
+            # Special handling for cut tool - set callbacks
+            if tool_name == 'cut' and tool:
+                tool.set_capture_callback(tab.canvas_widget.capture_region_to_clipboard)
+                tool.set_open_image_dialog_callback(tab.canvas_widget.open_image_dialog_with_clipboard)
+
             tab.canvas_widget.set_tool(tool)
 
         self.status_bar.showMessage(f"Tool: {tool_name.title() if tool_name else 'Select'}")
@@ -2058,8 +2084,9 @@ class MainWindow(QMainWindow):
             if tab.pdf_doc.open(file_name):
                 tab.file_path = file_name
 
-                # Try to load layer metadata from PDF
-                self._load_layers_from_pdf(tab)
+                # NOTE: We no longer auto-load layer metadata from regular PDFs
+                # because it causes duplication (layers appear both as PDF content
+                # and as editable layers). Use "Open Project" for editable projects.
 
                 # Update panels
                 self.thumbnail_panel.pdf_doc = tab.pdf_doc
@@ -2324,6 +2351,76 @@ class MainWindow(QMainWindow):
             page_num = canvas.current_page
             self.pdf_doc.export_page_as_image(page_num, file_name)
             self.status_bar.showMessage(f"Exported page {page_num + 1} to: {file_name}")
+
+    def export_all_pages_as_images(self):
+        """Export all PDF pages as images in a new folder"""
+        tab = self.current_tab
+        if not tab or not tab.pdf_doc or not tab.pdf_doc.doc:
+            QMessageBox.warning(self, "No Document", "Please open a PDF document first.")
+            return
+
+        # Ask user to select a directory
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Save Images",
+            "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+
+        if not folder_path:
+            return
+
+        # Get the PDF filename without extension for the subfolder name
+        pdf_name = os.path.splitext(os.path.basename(tab.file_path or "Untitled"))[0]
+        output_folder = os.path.join(folder_path, f"{pdf_name}_pages")
+
+        # Create the output folder
+        try:
+            os.makedirs(output_folder, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to create folder: {e}")
+            return
+
+        # Export each page
+        page_count = tab.pdf_doc.page_count
+        exported_count = 0
+
+        for page_num in range(page_count):
+            # Render page at high resolution (2x zoom for good quality)
+            pixmap = tab.pdf_doc.render_page(page_num, zoom=2.0)
+
+            if pixmap:
+                # Save as PNG with Page_1, Page_2, etc. naming
+                file_path = os.path.join(output_folder, f"Page_{page_num + 1}.png")
+                if pixmap.save(file_path, "PNG"):
+                    exported_count += 1
+                else:
+                    print(f"Failed to save page {page_num + 1}")
+
+            # Update status for progress feedback
+            self.status_bar.showMessage(f"Exporting page {page_num + 1} of {page_count}...")
+            QApplication.processEvents()  # Keep UI responsive
+
+        # Show completion message
+        if exported_count == page_count:
+            self.status_bar.showMessage(f"Exported {exported_count} pages to: {output_folder}")
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Successfully exported {exported_count} pages to:\n{output_folder}"
+            )
+        else:
+            self.status_bar.showMessage(f"Exported {exported_count}/{page_count} pages")
+            QMessageBox.warning(
+                self,
+                "Export Partial",
+                f"Exported {exported_count} of {page_count} pages.\nSome pages may have failed."
+            )
+
+    def show_merge_dialog(self):
+        """Show the Merge PDF dialog"""
+        dialog = MergePDFDialog(self)
+        dialog.exec()
 
     def print_document(self):
         """Print the current document"""
@@ -2799,6 +2896,9 @@ class MainWindow(QMainWindow):
         """Handle layer added"""
         self.properties_panel.refresh_layers()
         self.update_undo_redo_actions()
+        # Update thumbnail for the page where the layer was added
+        if hasattr(layer, 'page_num'):
+            self.thumbnail_panel.update_thumbnail(layer.page_num)
 
     def on_tool_color_changed(self, color: str):
         """Handle tool color change"""
@@ -2872,6 +2972,10 @@ class MainWindow(QMainWindow):
     def on_multi_layer_selection_changed(self, count: int):
         """Handle multi-layer selection change"""
         self.properties_panel.set_multi_layer_selection(count)
+
+    def on_layer_content_changed(self):
+        """Handle layer content change (e.g., text updated) - refresh layer names"""
+        self.properties_panel.refresh_layers()
 
     def on_align_layers_requested(self, align_type: str):
         """Handle layer alignment request from properties panel"""

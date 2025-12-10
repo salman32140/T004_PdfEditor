@@ -391,7 +391,7 @@ class ImageDialog(QDialog):
     """Dialog for image selection and scaling configuration with crop"""
 
     def __init__(self, parent=None, initial_image_path: str = None,
-                 initial_scale_mode: str = None):
+                 initial_scale_mode: str = None, initial_pixmap: QPixmap = None):
         super().__init__(parent)
         self.setWindowTitle("Insert Image")
         self.setModal(True)
@@ -401,8 +401,10 @@ class ImageDialog(QDialog):
         self.selected_image_path = initial_image_path
         self.scale_mode = initial_scale_mode or ImageScaleMode.FIT.value
 
-        # Load initial image if provided
-        if initial_image_path:
+        # Load initial image - prioritize pixmap over path
+        if initial_pixmap and not initial_pixmap.isNull():
+            self.selected_pixmap = initial_pixmap
+        elif initial_image_path:
             self.selected_pixmap = QPixmap(initial_image_path)
 
         self.setup_ui()
@@ -552,7 +554,10 @@ class ImageDialog(QDialog):
         # Update preview if initial image provided
         if self.selected_pixmap:
             self.crop_preview.set_image(self.selected_pixmap)
-            self.image_path_label.setText(self.selected_image_path or "Image loaded")
+            if self.selected_image_path:
+                self.image_path_label.setText(self.selected_image_path.split('/')[-1])
+            else:
+                self.image_path_label.setText("Image from clipboard")
 
     def select_image(self):
         """Open file dialog to select image"""

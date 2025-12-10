@@ -3,7 +3,7 @@ Enhanced PDF Canvas with Interactive Text Field Support
 Supports selecting, editing, moving, and deleting text fields, images, and symbols
 """
 from PyQt6.QtWidgets import QMenu, QInputDialog, QApplication
-from PyQt6.QtCore import Qt, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
 from PyQt6.QtGui import QMouseEvent, QAction, QCursor
 from .pdf_canvas import PDFCanvasWidget
 from .text_edit_dialog import TextEditDialog
@@ -25,6 +25,7 @@ class InteractivePDFCanvas(PDFCanvasWidget):
     text_selection_changed = pyqtSignal(bool)  # Emits True when text is selected, False otherwise
     color_used = pyqtSignal(str)  # Emits when a color is used (from dialogs like symbol, text, etc.)
     multi_layer_selection_changed = pyqtSignal(int)  # Emits count of selected layers (for alignment UI)
+    layer_content_changed = pyqtSignal()  # Emits when layer content changes (e.g., text updated)
 
     def __init__(self, pdf_doc, layer_manager, history_manager):
         super().__init__(pdf_doc, layer_manager, history_manager)
@@ -75,8 +76,13 @@ class InteractivePDFCanvas(PDFCanvasWidget):
         else:
             pos = self.widget_to_page_coords(event.position())
 
-        # Right-click context menu
+        # Right-click - check for CutTool first, then show context menu
         if event.button() == Qt.MouseButton.RightButton:
+            # CutTool right-click opens image dialog with clipboard
+            from tools.cut_tool import CutTool
+            if isinstance(self.current_tool, CutTool):
+                self.open_image_dialog_with_clipboard(pos)
+                return
             self.show_context_menu(event.position(), pos)
             return
 
@@ -170,6 +176,14 @@ class InteractivePDFCanvas(PDFCanvasWidget):
                     event.accept()  # BLOCK all other event handling
                     self.update()
                     return
+
+            # Handle CutTool - let it handle mouse events directly
+            from tools.cut_tool import CutTool
+            if isinstance(self.current_tool, CutTool):
+                handled = self.current_tool.mouse_press(event, self.current_page, pos)
+                if handled:
+                    self.update()
+                return
 
             # Check if selection tool is active
             from tools.selection_tool import SelectionTool
@@ -334,6 +348,14 @@ class InteractivePDFCanvas(PDFCanvasWidget):
             self.update()
             return
 
+        # Let CutTool handle its own movement
+        from tools.cut_tool import CutTool
+        if isinstance(self.current_tool, CutTool):
+            handled = self.current_tool.mouse_move(event, self.current_page, pos)
+            if handled:
+                self.update()
+                return
+
         # Let selection tool handle its own movement
         if isinstance(self.current_tool, SelectionTool):
             handled = self.current_tool.mouse_move(event, self.current_page, pos)
@@ -474,6 +496,14 @@ class InteractivePDFCanvas(PDFCanvasWidget):
                     self.update()
                     # Emit signal that text selection changed
                     self.text_selection_changed.emit(self.current_tool.has_active_selection())
+                return
+
+            # Handle CutTool specially - capture region to clipboard
+            from tools.cut_tool import CutTool
+            if isinstance(self.current_tool, CutTool):
+                handled = self.current_tool.mouse_release(event, self.current_page, pos)
+                if handled:
+                    self.update()
                 return
 
             # Handle other tools
@@ -806,6 +836,9 @@ class InteractivePDFCanvas(PDFCanvasWidget):
             # Emit color_used signal to update tool settings
             self.color_used.emit(values['color'])
 
+            # Emit layer content changed to update layer name in properties panel
+            self.layer_content_changed.emit()
+
             self.update()
 
     def show_image_creation_dialog(self, pos: QPointF):
@@ -862,10 +895,14 @@ class InteractivePDFCanvas(PDFCanvasWidget):
 
     def edit_image_layer(self, layer: ImageLayer):
         """Open edit dialog for image layer"""
+        # Get the layer's current pixmap (works for both file-based and clipboard images)
+        current_pixmap = layer.get_pixmap()
+
         dialog = ImageDialog(
             self,
             initial_image_path=layer.data.get('image_path'),
-            initial_scale_mode=layer.data.get('scale_mode', ImageScaleMode.FIT.value)
+            initial_scale_mode=layer.data.get('scale_mode', ImageScaleMode.FIT.value),
+            initial_pixmap=current_pixmap
         )
 
         if dialog.exec() == dialog.DialogCode.Accepted:
@@ -1587,3 +1624,93 @@ class InteractivePDFCanvas(PDFCanvasWidget):
             self.current_tool.clear_selection()
             self.text_selection_changed.emit(False)
             self.update()
+
+    def capture_region_to_clipboard(self, rect: QRectF, page_num: int):
+        """Capture a region of the PDF and copy it to clipboard as an image"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QImage
+
+        if rect.width() < 5 or rect.height() < 5:
+            return
+
+        # Render the page at high resolution
+        high_res_zoom = 2.0  # 2x for better quality
+        page_pixmap = self.pdf_doc.render_page(page_num, zoom=high_res_zoom)
+
+        if not page_pixmap:
+            return
+
+        # Calculate the crop rectangle in high-res coordinates
+        crop_rect = QRectF(
+            rect.x() * high_res_zoom,
+            rect.y() * high_res_zoom,
+            rect.width() * high_res_zoom,
+            rect.height() * high_res_zoom
+        ).toRect()
+
+        # Ensure crop rect is within bounds
+        crop_rect = crop_rect.intersected(page_pixmap.rect())
+
+        if crop_rect.isEmpty():
+            return
+
+        # Crop the pixmap
+        cropped_pixmap = page_pixmap.copy(crop_rect)
+
+        # Copy to clipboard
+        clipboard = QApplication.clipboard()
+        clipboard.setPixmap(cropped_pixmap)
+
+        print(f"Copied region to clipboard: {crop_rect.width()}x{crop_rect.height()} pixels")
+
+    def open_image_dialog_with_clipboard(self, pos: QPointF):
+        """Open image dialog with clipboard content pre-loaded"""
+        from PyQt6.QtWidgets import QApplication
+
+        # Get clipboard pixmap
+        clipboard = QApplication.clipboard()
+        clipboard_pixmap = clipboard.pixmap()
+
+        if clipboard_pixmap and not clipboard_pixmap.isNull():
+            # Open image dialog with clipboard image
+            dialog = ImageDialog(self, initial_pixmap=clipboard_pixmap)
+
+            if dialog.exec() == dialog.DialogCode.Accepted:
+                values = dialog.get_values()
+
+                if values['pixmap'] and not values['pixmap'].isNull():
+                    x = pos.x()
+                    y = pos.y()
+                    # Scale down if image is larger than reasonable size
+                    width = min(values['pixmap'].width(), 400)
+                    height = min(values['pixmap'].height(), 400)
+
+                    # Maintain aspect ratio
+                    aspect = values['pixmap'].width() / values['pixmap'].height()
+                    if width / height > aspect:
+                        width = height * aspect
+                    else:
+                        height = width / aspect
+
+                    # Create image layer
+                    image_layer = ImageLayer(
+                        self.current_page,
+                        x,
+                        y,
+                        values['pixmap'],
+                        width,
+                        height,
+                        values['image_path']
+                    )
+
+                    # Set scale mode
+                    image_layer.set_scale_mode(ImageScaleMode(values['scale_mode']))
+
+                    # Add to layer manager
+                    self.add_layer(image_layer)
+
+                    # Select the new layer
+                    self.select_layer(image_layer)
+        else:
+            # No clipboard image - show regular image dialog
+            self.show_image_creation_dialog(pos)

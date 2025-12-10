@@ -596,6 +596,17 @@ class ThumbnailContainer(QWidget):
         self.cards.clear()
         self.selected_pages.clear()
 
+    def update_thumbnail(self, page_num: int, pixmap: QPixmap):
+        """Update a specific page's thumbnail
+
+        Args:
+            page_num: The page number to update (0-indexed)
+            pixmap: The new thumbnail pixmap
+        """
+        if 0 <= page_num < len(self.cards):
+            self.cards[page_num].set_pixmap(pixmap)
+            self.cards[page_num].update()
+
     def block_context_menu(self, duration_ms: int = 300):
         """Block context menu for a specified duration"""
         self._context_menu_blocked = True
@@ -1221,6 +1232,24 @@ class ThumbnailPanel(QWidget):
     def get_selected_pages(self) -> List[int]:
         """Get selected pages"""
         return self.container.get_selected_pages()
+
+    def update_thumbnail(self, page_num: int):
+        """Update a specific page's thumbnail
+
+        Args:
+            page_num: The page number to update (0-indexed)
+        """
+        if not self.pdf_doc or not self.pdf_doc.doc:
+            return
+
+        if page_num < 0 or page_num >= self.pdf_doc.page_count:
+            return
+
+        # Render the updated thumbnail
+        pixmap = self.pdf_doc.render_page(page_num, zoom=0.2)
+        if pixmap:
+            # Update the thumbnail in the container
+            self.container.update_thumbnail(page_num, pixmap)
 
     def refresh(self, block_context_menu: bool = False):
         """Refresh thumbnails

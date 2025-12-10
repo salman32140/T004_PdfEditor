@@ -521,6 +521,10 @@ class ImageLayer(InteractiveLayer):
         if image_path:
             self.data['image_path'] = image_path
 
+    def get_pixmap(self) -> QPixmap:
+        """Get the current pixmap"""
+        return self.data.get('pixmap')
+
     def get_bounds(self, zoom: float = 1.0) -> QRectF:
         """Get accurate bounding rectangle"""
         x = self.data.get('x', 0) * zoom

@@ -109,93 +109,238 @@ class PDFExporter:
             # Convert hex color to RGB tuple (0-1 range)
             color = self._hex_to_rgb(color_hex)
 
-            # Map font names to PyMuPDF Base14 font names
-            # Use full font names that PyMuPDF recognizes
-            if bold and italic:
-                font_map = {
-                    'Arial': 'Helvetica-BoldOblique',
-                    'Helvetica': 'Helvetica-BoldOblique',
-                    'Times New Roman': 'Times-BoldItalic',
-                    'Times': 'Times-BoldItalic',
-                    'Courier New': 'Courier-BoldOblique',
-                    'Courier': 'Courier-BoldOblique'
-                }
-            elif bold:
-                font_map = {
-                    'Arial': 'Helvetica-Bold',
-                    'Helvetica': 'Helvetica-Bold',
-                    'Times New Roman': 'Times-Bold',
-                    'Times': 'Times-Bold',
-                    'Courier New': 'Courier-Bold',
-                    'Courier': 'Courier-Bold'
-                }
-            elif italic:
-                font_map = {
-                    'Arial': 'Helvetica-Oblique',
-                    'Helvetica': 'Helvetica-Oblique',
-                    'Times New Roman': 'Times-Italic',
-                    'Times': 'Times-Italic',
-                    'Courier New': 'Courier-Oblique',
-                    'Courier': 'Courier-Oblique'
-                }
-            else:
-                font_map = {
-                    'Arial': 'Helvetica',
-                    'Helvetica': 'Helvetica',
-                    'Times New Roman': 'Times-Roman',
-                    'Times': 'Times-Roman',
-                    'Courier New': 'Courier',
-                    'Courier': 'Courier'
-                }
-
-            pymupdf_font = font_map.get(font_name, 'Helvetica-Bold' if bold else 'Helvetica')
+            # Check if text contains non-ASCII characters (CJK, Korean, etc.)
+            needs_unicode_font = any(ord(c) > 127 for c in text)
 
             # Create text rectangle
             rect = fitz.Rect(x, y, x + width, y + height)
 
-            # If rotation is applied, we need to use a different approach
-            if rotation != 0:
-                import math
-                # Calculate center of text box
-                center_x = x + width / 2
-                center_y = y + height / 2
-
-                # Create rotation matrix
-                # Convert degrees to radians
-                angle_rad = math.radians(rotation)
-
-                # Create transformation matrix for rotation around center
-                # 1. Translate to origin
-                # 2. Rotate
-                # 3. Translate back
-                morph = (
-                    fitz.Point(center_x, center_y),  # Rotation center
-                    fitz.Matrix(rotation)  # Rotation angle in degrees
-                )
-
-                # Insert rotated text using morph parameter
-                page.insert_textbox(
-                    rect,
-                    text,
-                    fontsize=font_size,
-                    fontname=pymupdf_font,
-                    color=color,
-                    align=fitz.TEXT_ALIGN_LEFT,
-                    morph=morph
-                )
+            if needs_unicode_font:
+                # For Unicode text (Korean, Chinese, Japanese, etc.)
+                # Render as image for guaranteed proper display
+                self._add_text_as_image(page, layer)
             else:
-                # Insert text normally without rotation
-                page.insert_textbox(
-                    rect,
-                    text,
-                    fontsize=font_size,
-                    fontname=pymupdf_font,
-                    color=color,
-                    align=fitz.TEXT_ALIGN_LEFT
-                )
+                # Use Base14 fonts for ASCII text (smaller file size)
+                # Map font names to PyMuPDF Base14 font names
+                if bold and italic:
+                    font_map = {
+                        'Arial': 'Helvetica-BoldOblique',
+                        'Helvetica': 'Helvetica-BoldOblique',
+                        'Times New Roman': 'Times-BoldItalic',
+                        'Times': 'Times-BoldItalic',
+                        'Courier New': 'Courier-BoldOblique',
+                        'Courier': 'Courier-BoldOblique'
+                    }
+                elif bold:
+                    font_map = {
+                        'Arial': 'Helvetica-Bold',
+                        'Helvetica': 'Helvetica-Bold',
+                        'Times New Roman': 'Times-Bold',
+                        'Times': 'Times-Bold',
+                        'Courier New': 'Courier-Bold',
+                        'Courier': 'Courier-Bold'
+                    }
+                elif italic:
+                    font_map = {
+                        'Arial': 'Helvetica-Oblique',
+                        'Helvetica': 'Helvetica-Oblique',
+                        'Times New Roman': 'Times-Italic',
+                        'Times': 'Times-Italic',
+                        'Courier New': 'Courier-Oblique',
+                        'Courier': 'Courier-Oblique'
+                    }
+                else:
+                    font_map = {
+                        'Arial': 'Helvetica',
+                        'Helvetica': 'Helvetica',
+                        'Times New Roman': 'Times-Roman',
+                        'Times': 'Times-Roman',
+                        'Courier New': 'Courier',
+                        'Courier': 'Courier'
+                    }
+
+                pymupdf_font = font_map.get(font_name, 'Helvetica-Bold' if bold else 'Helvetica')
+
+                if rotation != 0:
+                    morph = (
+                        fitz.Point(x + width / 2, y + height / 2),
+                        fitz.Matrix(rotation)
+                    )
+                    page.insert_textbox(
+                        rect,
+                        text,
+                        fontsize=font_size,
+                        fontname=pymupdf_font,
+                        color=color,
+                        align=fitz.TEXT_ALIGN_LEFT,
+                        morph=morph
+                    )
+                else:
+                    page.insert_textbox(
+                        rect,
+                        text,
+                        fontsize=font_size,
+                        fontname=pymupdf_font,
+                        color=color,
+                        align=fitz.TEXT_ALIGN_LEFT
+                    )
 
         except Exception as e:
             print(f"Error adding text to PDF: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _find_unicode_font(self, bold: bool = False, italic: bool = False) -> str:
+        """Find a system font that supports Unicode/CJK characters
+
+        Returns the path to a suitable font file, or None if not found.
+        """
+        import platform
+        system = platform.system()
+
+        # Common CJK/Unicode font paths by OS
+        font_candidates = []
+
+        if system == "Linux":
+            # Linux font paths - prefer Noto fonts for best CJK support
+            font_candidates = [
+                # Noto Sans CJK (best coverage)
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                # Noto Sans Korean
+                "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
+                "/usr/share/fonts/opentype/noto/NotoSansKR-Regular.otf",
+                # DejaVu (good Unicode coverage)
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                # Liberation fonts
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                # Ubuntu fonts
+                "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+                # Droid fonts
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                # WenQuanYi (Chinese)
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            ]
+            if bold:
+                font_candidates = [
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                    "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+                    "/usr/share/fonts/truetype/noto/NotoSansKR-Bold.otf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                ] + font_candidates
+
+        elif system == "Darwin":  # macOS
+            font_candidates = [
+                # macOS system fonts with CJK support
+                "/System/Library/Fonts/AppleSDGothicNeo.ttc",  # Korean
+                "/System/Library/Fonts/PingFang.ttc",  # Chinese
+                "/System/Library/Fonts/Hiragino Sans GB.ttc",  # Japanese/Chinese
+                "/Library/Fonts/Arial Unicode.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            ]
+
+        elif system == "Windows":
+            font_candidates = [
+                # Windows fonts with CJK support
+                "C:/Windows/Fonts/malgun.ttf",  # Korean (Malgun Gothic)
+                "C:/Windows/Fonts/malgunbd.ttf",  # Korean Bold
+                "C:/Windows/Fonts/msyh.ttc",  # Chinese (Microsoft YaHei)
+                "C:/Windows/Fonts/meiryo.ttc",  # Japanese
+                "C:/Windows/Fonts/simsun.ttc",  # Chinese (SimSun)
+                "C:/Windows/Fonts/arial.ttf",
+                "C:/Windows/Fonts/arialuni.ttf",  # Arial Unicode MS
+            ]
+
+        # Find first existing font
+        for font_path in font_candidates:
+            if os.path.exists(font_path):
+                return font_path
+
+        return None
+
+    def _add_text_as_image(self, page: fitz.Page, layer: 'TextFieldLayer'):
+        """Render text layer as an image for full Unicode support (Korean, Chinese, etc.)"""
+        try:
+            from PyQt6.QtGui import QImage, QPainter, QFont, QColor, QFontDatabase
+            from PyQt6.QtCore import Qt, QRectF
+
+            text = layer.get_text()
+            if not text:
+                return
+
+            x = layer.data.get('x', 0)
+            y = layer.data.get('y', 0)
+            width = layer.data.get('width', 150)
+            height = layer.data.get('height', 40)
+            font_name = layer.data.get('font', 'Arial')
+            font_size = layer.data.get('font_size', 12)
+            color_hex = layer.data.get('color', '#000000')
+            bold = layer.data.get('bold', False)
+            italic = layer.data.get('italic', False)
+            rotation = layer.rotation if hasattr(layer, 'rotation') else 0
+
+            # Create high-resolution image for better quality
+            scale = 4
+            img_width = max(1, int(width * scale))
+            img_height = max(1, int(height * scale))
+
+            image = QImage(img_width, img_height, QImage.Format.Format_ARGB32)
+            image.fill(Qt.GlobalColor.transparent)
+
+            painter = QPainter(image)
+            if not painter.isActive():
+                print("Error: QPainter failed to initialize")
+                return
+
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+            # Set font - try to use a font that supports the text
+            font = QFont(font_name, int(font_size * scale))
+            font.setBold(bold)
+            font.setItalic(italic)
+
+            # Set font style strategy to prefer fonts that support the characters
+            font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+
+            painter.setFont(font)
+            painter.setPen(QColor(color_hex))
+
+            # Draw text with word wrap
+            rect = QRectF(0, 0, img_width, img_height)
+            flags = int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop) | int(Qt.TextFlag.TextWordWrap)
+            painter.drawText(rect, flags, text)
+            painter.end()
+
+            # Convert QImage to bytes
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            image.save(buffer, "PNG")
+            img_bytes = bytes(buffer.data())
+            buffer.close()
+
+            if len(img_bytes) == 0:
+                print("Error: Generated empty image for text")
+                return
+
+            # Insert image into PDF
+            img_rect = fitz.Rect(x, y, x + width, y + height)
+
+            if rotation != 0:
+                # Apply rotation
+                center = fitz.Point(x + width / 2, y + height / 2)
+                morph = (center, fitz.Matrix(rotation))
+                page.insert_image(img_rect, stream=img_bytes, morph=morph)
+            else:
+                page.insert_image(img_rect, stream=img_bytes)
+
+            print(f"  → Added Unicode text as image: '{text[:20]}...' at ({x}, {y})")
+
+        except Exception as e:
+            print(f"Error adding text as image: {e}")
             import traceback
             traceback.print_exc()
 
