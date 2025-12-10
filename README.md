@@ -10,14 +10,16 @@ A professional PDF editing application built with Python and PyQt6.
 - **Image Insertion**: Insert and resize images with multiple scaling modes
 - **Symbol Tool**: Insert unicode symbols with customizable size and color
 - **Selection Tool**: Select, move, resize, and rotate multiple layers
+- **Cut Tool**: Select any region of a PDF page and copy to clipboard as image, right-click to insert as image layer
 - **Text Selection**: Select, copy, highlight, underline, and strikethrough PDF text
 - **Layer Management**: Organize annotations with layer panel, visibility toggle, and z-ordering
 - **Page Operations**: Insert, delete, duplicate, rotate, and reorder pages via drag-drop
+- **Merge PDFs**: Combine multiple PDF files with drag-drop reordering and thumbnail preview
 - **Document Translation**: Translate PDF documents using local LLM (llama-cpp)
 - **AI Assistant**: Chat with your PDF using local AI models
 - **Multi-tab Support**: Work with multiple documents simultaneously
 - **Undo/Redo**: Full history support for all operations
-- **Export Options**: Save as PDF or export pages as images
+- **Export Options**: Save as PDF, export single page or all pages as images (PNG/JPG)
 - **Theme Support**: Automatic light/dark theme detection
 
 ## Requirements
