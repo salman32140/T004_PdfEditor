@@ -1,6 +1,6 @@
 """
 Merge PDF Dialog
-Panel-based dialog for selecting, previewing, reordering, and merging multiple PDF files
+Panel-based dialog for selecting, previewing, reordering, and merging multiple PDF files and images
 """
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                               QLabel, QFileDialog, QMessageBox, QWidget,
@@ -13,16 +13,34 @@ import fitz  # PyMuPDF
 import os
 
 
+# Supported file extensions
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.tif', '.webp'}
+PDF_EXTENSIONS = {'.pdf'}
+
+
+def is_image_file(file_path: str) -> bool:
+    """Check if file is an image"""
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext in IMAGE_EXTENSIONS
+
+
+def is_pdf_file(file_path: str) -> bool:
+    """Check if file is a PDF"""
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext in PDF_EXTENSIONS
+
+
 class PDFThumbnailCard(QFrame):
-    """Individual PDF thumbnail card with selection and drag support"""
+    """Individual PDF/Image thumbnail card with selection and drag support"""
 
     clicked = pyqtSignal(object)  # Emits self when clicked
 
-    def __init__(self, file_path: str, thumbnail: QPixmap = None, parent=None):
+    def __init__(self, file_path: str, thumbnail: QPixmap = None, is_image: bool = False, parent=None):
         super().__init__(parent)
         self.file_path = file_path
         self.file_name = os.path.basename(file_path)
         self.thumbnail = thumbnail
+        self.is_image = is_image  # True if this is an image file, False if PDF
         self._selected = False
         self._drag_start_pos = None
 
@@ -53,7 +71,7 @@ class PDFThumbnailCard(QFrame):
             )
             self.thumb_label.setPixmap(scaled)
         else:
-            self.thumb_label.setText("PDF")
+            self.thumb_label.setText("IMG" if self.is_image else "PDF")
 
         layout.addWidget(self.thumb_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
@@ -217,7 +235,7 @@ class ThumbnailGridPanel(QScrollArea):
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         # Placeholder label
-        self.placeholder = QLabel("Drop PDF files here or click 'Add PDF' to get started")
+        self.placeholder = QLabel("Drop files here or click 'Add Files' to get started")
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._update_placeholder_style()
         self.grid_layout.addWidget(self.placeholder, 0, 0, 1, 4)
@@ -408,16 +426,17 @@ class ThumbnailGridPanel(QScrollArea):
 
 
 class MergePDFDialog(QDialog):
-    """Panel-based dialog for merging multiple PDF files"""
+    """Panel-based dialog for merging multiple PDF files and images"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Merge PDF Files")
+        self.setWindowTitle("Merge Files to PDF")
         self.setModal(True)
         self.resize(650, 520)
         self.setMinimumSize(500, 400)
 
         self.thumbnails = {}  # Cache thumbnails: path -> QPixmap
+        self.file_types = {}  # Cache file types: path -> 'pdf' or 'image'
 
         self._setup_ui()
         self._connect_signals()
@@ -429,12 +448,12 @@ class MergePDFDialog(QDialog):
         layout.setContentsMargins(15, 15, 15, 15)
 
         # Header
-        header = QLabel("Merge PDF Files")
+        header = QLabel("Merge Files to PDF")
         header.setStyleSheet("font-size: 14px; font-weight: bold; padding-bottom: 2px;")
         layout.addWidget(header)
 
         # Subtitle
-        subtitle = QLabel("Add PDFs, drag thumbnails to reorder, then merge.")
+        subtitle = QLabel("Add PDFs and images, drag to reorder, then merge into a single PDF.")
         self._apply_subtitle_style(subtitle)
         layout.addWidget(subtitle)
 
@@ -442,8 +461,8 @@ class MergePDFDialog(QDialog):
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
 
-        # Add PDF button
-        self.add_btn = QPushButton("Add PDF")
+        # Add Files button
+        self.add_btn = QPushButton("Add Files")
         self.add_btn.setIcon(get_icon("plus"))
         self._apply_button_style(self.add_btn, "primary")
         button_row.addWidget(self.add_btn)
@@ -483,7 +502,7 @@ class MergePDFDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         bottom_row.addWidget(cancel_btn)
 
-        self.merge_btn = QPushButton("Merge PDFs")
+        self.merge_btn = QPushButton("Merge to PDF")
         self.merge_btn.setEnabled(False)
         self._apply_button_style(self.merge_btn, "action")
         bottom_row.addWidget(self.merge_btn)
@@ -667,79 +686,93 @@ class MergePDFDialog(QDialog):
 
     def _connect_signals(self):
         """Connect signals to slots"""
-        self.add_btn.clicked.connect(self.add_pdfs)
+        self.add_btn.clicked.connect(self.add_files)
         self.remove_btn.clicked.connect(self.remove_selected)
         self.clear_btn.clicked.connect(self.clear_all)
-        self.merge_btn.clicked.connect(self.merge_pdfs)
+        self.merge_btn.clicked.connect(self.merge_files)
         self.grid_panel.selection_changed.connect(self._on_selection_changed)
         self.grid_panel.order_changed.connect(self._update_status)
 
-    def add_pdfs(self):
-        """Open file dialog to add PDF files"""
+    def add_files(self):
+        """Open file dialog to add PDF files and images"""
+        file_filter = "All Supported Files (*.pdf *.png *.jpg *.jpeg *.bmp *.gif *.tiff *.tif *.webp);;PDF Files (*.pdf);;Image Files (*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.tif *.webp);;All Files (*)"
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select PDF Files",
+            "Select PDF Files or Images",
             "",
-            "PDF Files (*.pdf)"
+            file_filter
         )
 
         existing_paths = set(self.grid_panel.get_ordered_file_paths())
 
         for path in file_paths:
             if path not in existing_paths:
-                self._add_pdf_file(path)
+                self._add_file(path)
 
         self._update_status()
 
-    def _add_pdf_file(self, file_path: str):
-        """Add a single PDF file to the grid"""
+    def _add_file(self, file_path: str):
+        """Add a single PDF or image file to the grid"""
         if not os.path.exists(file_path):
             return
 
+        is_image = is_image_file(file_path)
+
         # Generate thumbnail
-        thumbnail = self._generate_thumbnail(file_path)
+        thumbnail = self._generate_thumbnail(file_path, is_image)
         self.thumbnails[file_path] = thumbnail
+        self.file_types[file_path] = 'image' if is_image else 'pdf'
 
         # Create and add card
-        card = PDFThumbnailCard(file_path, thumbnail)
+        card = PDFThumbnailCard(file_path, thumbnail, is_image=is_image)
         self.grid_panel.add_card(card)
 
-    def _generate_thumbnail(self, file_path: str) -> QPixmap:
-        """Generate a thumbnail for the first page of a PDF"""
+    def _generate_thumbnail(self, file_path: str, is_image: bool = False) -> QPixmap:
+        """Generate a thumbnail for a PDF or image file"""
         try:
-            doc = fitz.open(file_path)
-            if doc.page_count > 0:
-                page = doc[0]
-                # Render at moderate resolution for thumbnail
-                mat = fitz.Matrix(0.4, 0.4)
-                pix = page.get_pixmap(matrix=mat)
+            if is_image:
+                # Load image directly
+                pixmap = QPixmap(file_path)
+                if not pixmap.isNull():
+                    return pixmap
+            else:
+                # PDF - render first page
+                doc = fitz.open(file_path)
+                if doc.page_count > 0:
+                    page = doc[0]
+                    # Render at moderate resolution for thumbnail
+                    mat = fitz.Matrix(0.4, 0.4)
+                    pix = page.get_pixmap(matrix=mat)
 
-                # Convert to QPixmap
-                img_data = pix.tobytes("ppm")
-                pixmap = QPixmap()
-                pixmap.loadFromData(img_data)
+                    # Convert to QPixmap
+                    img_data = pix.tobytes("ppm")
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(img_data)
 
-                doc.close()
-                return pixmap
+                    doc.close()
+                    return pixmap
         except Exception as e:
             print(f"Error generating thumbnail for {file_path}: {e}")
 
         return QPixmap()
 
     def remove_selected(self):
-        """Remove selected PDFs from the grid"""
+        """Remove selected files from the grid"""
         selected = self.grid_panel.get_selected_cards()
         for card in selected:
             if card.file_path in self.thumbnails:
                 del self.thumbnails[card.file_path]
+            if card.file_path in self.file_types:
+                del self.file_types[card.file_path]
 
         self.grid_panel.remove_selected()
         self._update_status()
 
     def clear_all(self):
-        """Clear all PDFs from the grid"""
+        """Clear all files from the grid"""
         self.grid_panel.clear_all()
         self.thumbnails.clear()
+        self.file_types.clear()
         self._update_status()
 
     def _on_selection_changed(self):
@@ -765,12 +798,12 @@ class MergePDFDialog(QDialog):
             self.merge_btn.setEnabled(True)
             self.clear_btn.setEnabled(True)
 
-    def merge_pdfs(self):
-        """Merge all PDFs and save to a new file"""
+    def merge_files(self):
+        """Merge all PDFs and images into a single PDF"""
         ordered_files = self.grid_panel.get_ordered_file_paths()
 
         if len(ordered_files) < 2:
-            QMessageBox.warning(self, "Not Enough Files", "Please add at least 2 PDF files to merge.")
+            QMessageBox.warning(self, "Not Enough Files", "Please add at least 2 files to merge.")
             return
 
         # Ask for output file
@@ -793,9 +826,16 @@ class MergePDFDialog(QDialog):
 
             for file_path in ordered_files:
                 try:
-                    pdf_doc = fitz.open(file_path)
-                    merged_doc.insert_pdf(pdf_doc)
-                    pdf_doc.close()
+                    file_type = self.file_types.get(file_path, 'pdf')
+
+                    if file_type == 'image':
+                        # Convert image to PDF page
+                        self._add_image_as_page(merged_doc, file_path)
+                    else:
+                        # Insert PDF pages
+                        pdf_doc = fitz.open(file_path)
+                        merged_doc.insert_pdf(pdf_doc)
+                        pdf_doc.close()
                 except Exception as e:
                     QMessageBox.warning(
                         self,
@@ -811,7 +851,7 @@ class MergePDFDialog(QDialog):
             QMessageBox.information(
                 self,
                 "Merge Complete",
-                f"Successfully merged {len(ordered_files)} PDFs into:\n{output_path}"
+                f"Successfully merged {len(ordered_files)} files into:\n{output_path}"
             )
 
             self.accept()
@@ -820,5 +860,60 @@ class MergePDFDialog(QDialog):
             QMessageBox.critical(
                 self,
                 "Merge Failed",
-                f"Failed to merge PDFs: {e}"
+                f"Failed to merge files: {e}"
             )
+
+    def _add_image_as_page(self, doc: fitz.Document, image_path: str):
+        """Add an image as a new page in the PDF document"""
+        # Open the image to get its dimensions
+        img = fitz.open(image_path)
+
+        # Get image dimensions
+        if img.page_count > 0:
+            # For multi-page images (like TIFF), add all pages
+            for page_num in range(img.page_count):
+                img_page = img[page_num]
+                pix = img_page.get_pixmap()
+
+                # Create a new page with image dimensions
+                # Use A4 as max size, scale down if image is larger
+                img_width = pix.width
+                img_height = pix.height
+
+                # Calculate page size (fit to A4 if larger)
+                a4_width = 595  # A4 width in points
+                a4_height = 842  # A4 height in points
+
+                # Scale to fit A4 while maintaining aspect ratio
+                scale = min(a4_width / img_width, a4_height / img_height, 1.0)
+                page_width = img_width * scale
+                page_height = img_height * scale
+
+                # Create new page
+                new_page = doc.new_page(width=page_width, height=page_height)
+
+                # Insert image
+                rect = fitz.Rect(0, 0, page_width, page_height)
+                new_page.insert_image(rect, filename=image_path)
+
+            img.close()
+        else:
+            # Fallback for simple images
+            img.close()
+
+            # Load with pixmap
+            pix = fitz.Pixmap(image_path)
+            img_width = pix.width
+            img_height = pix.height
+
+            # Calculate page size
+            a4_width = 595
+            a4_height = 842
+            scale = min(a4_width / img_width, a4_height / img_height, 1.0)
+            page_width = img_width * scale
+            page_height = img_height * scale
+
+            # Create new page and insert image
+            new_page = doc.new_page(width=page_width, height=page_height)
+            rect = fitz.Rect(0, 0, page_width, page_height)
+            new_page.insert_image(rect, filename=image_path)

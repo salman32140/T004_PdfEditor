@@ -14,7 +14,7 @@ A professional PDF editing application built with Python and PyQt6.
 - **Text Selection**: Select, copy, highlight, underline, and strikethrough PDF text
 - **Layer Management**: Organize annotations with layer panel, visibility toggle, and z-ordering
 - **Page Operations**: Insert, delete, duplicate, rotate, and reorder pages via drag-drop
-- **Merge PDFs**: Combine multiple PDF files with drag-drop reordering and thumbnail preview
+- **Merge PDFs & Images**: Combine multiple PDF files and images into a single PDF with drag-drop reordering and thumbnail preview
 - **Document Translation**: Translate PDF documents using local LLM (llama-cpp)
 - **AI Assistant**: Chat with your PDF using local AI models
 - **Multi-tab Support**: Work with multiple documents simultaneously

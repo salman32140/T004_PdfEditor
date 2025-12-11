@@ -1072,6 +1072,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PDF Editor - Professional PDF Editing Tool")
         self.resize(1400, 900)
 
+        # Enable drag and drop for opening files
+        self.setAcceptDrops(True)
+
     @property
     def current_tab(self) -> PDFTab:
         """Get current active tab"""
@@ -2066,9 +2069,12 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("PDF Editor - Untitled")
 
-    def open_file(self):
+    def open_file(self, file_path: str = None):
         """Open PDF file in a new tab"""
-        file_name, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
+        if file_path:
+            file_name = file_path
+        else:
+            file_name, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         if file_name:
             # Check if file is already open in another tab
             for i, tab in enumerate(self.tabs):
@@ -3086,6 +3092,43 @@ class MainWindow(QMainWindow):
                          <p><b>Credits:</b><br>
                          Icons by <a href="https://feathericons.com/">Feather Icons</a> (MIT License)</p>
                          """)
+
+    def dragEnterEvent(self, event):
+        """Handle drag enter event for file drops"""
+        if event.mimeData().hasUrls():
+            # Check if any of the files are PDFs
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if file_path.lower().endswith('.pdf'):
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        """Handle drag move event"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        """Handle drop event - open dropped PDF files"""
+        if event.mimeData().hasUrls():
+            pdf_files = []
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if file_path.lower().endswith('.pdf'):
+                        pdf_files.append(file_path)
+
+            # Open each PDF file in a new tab
+            for file_path in pdf_files:
+                self.open_file(file_path)
+
+            if pdf_files:
+                event.acceptProposedAction()
+                return
+
+        event.ignore()
 
     def closeEvent(self, event):
         """Handle window close"""
